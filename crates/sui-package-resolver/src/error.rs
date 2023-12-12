@@ -69,4 +69,7 @@ pub enum Error {
 
     #[error("Type layout nesting exceeded limit of {0}")]
     ValueNesting(usize),
+
+    #[error("Enum not found: {0}::{1}::{2}")]
+    EnumNotFound(AccountAddress, String, String),
 }
