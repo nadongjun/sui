@@ -1,11 +1,17 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::authority::authority_notify_read::EffectsNotifyRead;
+use crate::authority::authority_store::ExecutionLockReadGuard;
 use crate::authority::AuthorityStore;
+use crate::authority::{
+    authority_notify_read::EffectsNotifyRead,
+    authority_store::{LockDetails, LockDetailsWrapper},
+};
 use crate::transaction_outputs::TransactionOutputs;
 use async_trait::async_trait;
 
+use dashmap::mapref::entry::Entry as DashMapEntry;
+use dashmap::mapref::entry::OccupiedEntry as DashMapOccupiedEntry;
 use dashmap::DashMap;
 use either::Either;
 use futures::{
@@ -36,7 +42,7 @@ use sui_types::{
     object::Owner,
     storage::InputKey,
 };
-use tracing::instrument;
+use tracing::{info, instrument};
 use typed_store::Map;
 
 pub trait ExecutionCacheRead: Send + Sync {
@@ -212,6 +218,8 @@ pub trait ExecutionCacheRead: Send + Sync {
     ) -> Option<Object>;
 
     fn get_latest_lock_for_object_id(&self, object_id: ObjectID) -> SuiResult<ObjectRef>;
+
+    fn check_owned_object_locks_exist(&self, objects: &[ObjectRef]) -> SuiResult;
 
     fn multi_get_transaction_blocks(
         &self,
@@ -424,6 +432,14 @@ pub trait ExecutionCacheWrite: Send + Sync {
     /// called notify_read_objects_for_execution or notify_read_objects_for_signing for the object
     /// in question.
     fn write_transaction_outputs(&self, epoch_id: EpochId, tx_outputs: TransactionOutputs);
+
+    /// Attempt to acquire object locks for all of the owned input locks.
+    fn acquire_transaction_locks(
+        &self,
+        execution_lock: &ExecutionLockReadGuard<'_>,
+        owned_input_objects: &[ObjectRef],
+        tx_digest: TransactionDigest,
+    ) -> SuiResult;
 }
 
 enum ObjectEntry {
@@ -447,6 +463,12 @@ enum CacheResult<T> {
     NegativeHit,
     /// Entry is not in the cache and may or may not exist in the store
     Miss,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LockEntry {
+    Lock(Option<LockDetails>),
+    Deleted,
 }
 
 pub struct InMemoryCache {
@@ -478,6 +500,9 @@ pub struct InMemoryCache {
     // Note that, like any other dirty object, all packages are also stored in `objects` until they are
     // flushed to disk.
     packages: MokaCache<ObjectID, PackageObject>,
+
+    // Mirrors the owned_object_transaction_locks table in the db.
+    owned_object_transaction_locks: DashMap<ObjectRef, LockEntry>,
 
     // Markers for received objects and deleted shared objects. This contains all of the dirty
     // marker state, which is committed to the db at the same time as other transaction data.
@@ -535,6 +560,7 @@ impl InMemoryCache {
         Self {
             objects: DashMap::new(),
             object_cache,
+            owned_object_transaction_locks: DashMap::new(),
             packages,
             markers: DashMap::new(),
             marker_cache,
@@ -611,6 +637,40 @@ impl InMemoryCache {
 
     pub fn as_notify_read_wrapper(self: Arc<Self>) -> NotifyReadWrapper {
         NotifyReadWrapper(self)
+    }
+
+    // Load a lock entry from the cache, populating it from the db if the cache
+    // does not have the entry. The cache may be missing entries, but it can
+    // never be incoherent (hold an entry that doesn't exist in the db, or that
+    // differs from the db) because all db writes for locks go through the cache.
+    fn get_owned_object_lock_entry(
+        &self,
+        obj_ref: &ObjectRef,
+    ) -> SuiResult<DashMapOccupiedEntry<'_, ObjectRef, LockEntry>> {
+        let entry = self.owned_object_transaction_locks.entry(*obj_ref);
+        let occupied = match entry {
+            DashMapEntry::Occupied(occupied) => {
+                if cfg!(debug_assertions) {
+                    if let (Ok(db_lock), LockEntry::Lock(cached_lock)) =
+                        (self.store.get_lock_entry(*obj_ref), occupied.get())
+                    {
+                        assert_eq!(
+                            *cached_lock, db_lock,
+                            "cache is incoherent for object ref {:?}",
+                            obj_ref
+                        );
+                    }
+                }
+
+                occupied
+            }
+            DashMapEntry::Vacant(entry) => {
+                let lock = self.store.get_lock_entry(*obj_ref)?;
+                entry.insert_entry(LockEntry::Lock(lock))
+            }
+        };
+
+        Ok(occupied)
     }
 }
 
@@ -849,6 +909,33 @@ impl ExecutionCacheRead for InMemoryCache {
         Ok(lock)
     }
 
+    fn check_owned_object_locks_exist(&self, objects: &[ObjectRef]) -> SuiResult {
+        let mut fallback_objects = Vec::with_capacity(objects.len());
+
+        for obj_ref in objects {
+            match self
+                .owned_object_transaction_locks
+                .get(obj_ref)
+                .as_ref()
+                .map(|e| e.value())
+            {
+                Some(LockEntry::Deleted) => {
+                    let lock = self.get_latest_lock_for_object_id(obj_ref.0)?;
+                    return Err(SuiError::UserInputError {
+                        error: UserInputError::ObjectVersionUnavailableForConsumption {
+                            provided_obj_ref: *obj_ref,
+                            current_version: lock.1,
+                        },
+                    });
+                }
+                Some(LockEntry::Lock(_)) => (),
+                None => fallback_objects.push(*obj_ref),
+            }
+        }
+
+        self.store.check_owned_object_locks_exist(&fallback_objects)
+    }
+
     fn multi_get_transaction_blocks(
         &self,
         digests: &[TransactionDigest],
@@ -1043,7 +1130,133 @@ impl ExecutionCacheRead for InMemoryCache {
 }
 
 impl ExecutionCacheWrite for InMemoryCache {
-    #[instrument(level = "debug", skip_all)]
+    #[instrument(level = "trace", skip_all)]
+    fn acquire_transaction_locks(
+        &self,
+        execution_lock: &ExecutionLockReadGuard<'_>,
+        owned_input_objects: &[ObjectRef],
+        tx_digest: TransactionDigest,
+    ) -> SuiResult {
+        let epoch = **execution_lock;
+        let mut ret = Ok(());
+
+        let mut locks_to_write: Vec<(_, Option<LockDetailsWrapper>)> =
+            Vec::with_capacity(owned_input_objects.len());
+        let mut previous_values = Vec::with_capacity(owned_input_objects.len());
+
+        // Note that this function does not have to operate atomically. If there are two racing threads,
+        // then they are either trying to lock the same transaction (in which case both will succeed),
+        // or they are trying to lock the same object in two different transactions, in which case
+        // the sender has equivocated, and we are under no obligation to help them form a cert.
+        for obj_ref in owned_input_objects.iter() {
+            // entry holds a lock in the dashmap shard which allows us to safely test and set here.
+            let mut entry = match self.get_owned_object_lock_entry(obj_ref) {
+                Ok(entry) => entry,
+                Err(e) => {
+                    ret = Err(e);
+                    break;
+                }
+            };
+
+            let previous_value = entry.get().clone();
+
+            match previous_value {
+                LockEntry::Deleted => {
+                    ret = Err(SuiError::UserInputError {
+                        error: UserInputError::ObjectNotFound {
+                            object_id: obj_ref.0,
+                            version: Some(obj_ref.1),
+                        },
+                    });
+                    break;
+                }
+
+                // Lock exists, but is not set, so we can overwrite it
+                LockEntry::Lock(None) => (),
+
+                // Lock is set. Check for equivocation and expiry due to the lock
+                // being set in a previous epoch.
+                LockEntry::Lock(Some(LockDetails {
+                    epoch: previous_epoch,
+                    tx_digest: previous_tx_digest,
+                })) => {
+                    // this should not be possible because we hold the execution lock
+                    debug_assert!(
+                        epoch >= previous_epoch,
+                        "epoch changed while acquiring locks"
+                    );
+                    if epoch < previous_epoch {
+                        ret = Err(SuiError::ObjectLockedAtFutureEpoch {
+                            obj_refs: owned_input_objects.to_vec(),
+                            locked_epoch: previous_epoch,
+                            new_epoch: epoch,
+                            locked_by_tx: previous_tx_digest,
+                        });
+                        break;
+                    }
+
+                    // Lock already set to different transaction from the same epoch.
+                    // If the lock is set in a previous epoch, it's ok to override it.
+                    if previous_epoch == epoch && previous_tx_digest != tx_digest {
+                        // TODO: add metrics here
+                        info!(prev_tx_digest = ?previous_tx_digest,
+                          cur_tx_digest = ?tx_digest,
+                          "Cannot acquire lock: conflicting transaction!");
+                        ret = Err(SuiError::ObjectLockConflict {
+                            obj_ref: *obj_ref,
+                            pending_transaction: previous_tx_digest,
+                        });
+                        break;
+                    }
+                    if epoch == previous_epoch {
+                        // Exactly the same epoch and same transaction, nothing to lock here.
+                        continue;
+                    } else {
+                        info!(prev_epoch =? previous_epoch, cur_epoch =? epoch, "Overriding an old lock from previous epoch");
+                        // Fall through and override the old lock.
+                    }
+                }
+            }
+            let lock_details = LockDetails { epoch, tx_digest };
+            previous_values.push(previous_value.clone());
+            locks_to_write.push((*obj_ref, Some(lock_details.clone().into())));
+            *entry.get_mut() = LockEntry::Lock(Some(lock_details));
+        }
+
+        if ret.is_ok() {
+            // commit all writes to DB
+            self.store.write_locks(&locks_to_write)?;
+        } else {
+            // revert all writes and return error
+            // Note that reverting is not required for liveness, since a well formed and un-equivocating
+            // txn cannot fail to acquire locks.
+            // However, a user may inadvertently sign a txn that tries to use an old object. If they do this,
+            // they will not be able to obtain a lock, but we'd like to unlock the other objects in the
+            // transaction so they can correct the error.
+            assert_eq!(locks_to_write.len(), previous_values.len());
+            for ((obj_ref, new_value), previous_value) in
+                locks_to_write.into_iter().zip(previous_values.into_iter())
+            {
+                let mut entry = self.get_owned_object_lock_entry(&obj_ref)?;
+
+                // it is impossible for any other thread to modify the lock value after we have
+                // written it. This is because the only case in which we overwrite a lock is when
+                // the epoch has changed, but because we are holding ExecutionLockReadGuard, the
+                // epoch cannot change within this function.
+                assert_eq!(
+                    *entry.get(),
+                    LockEntry::Lock(new_value.map(|l| l.clone().migrate().into_inner())),
+                    "lock for {:?} was modified by another thread (should be impossible)",
+                    obj_ref
+                );
+                *entry.get_mut() = previous_value;
+            }
+        }
+
+        ret
+    }
+
+    #[instrument(level = "trace", skip_all)]
     fn write_transaction_outputs(&self, epoch_id: EpochId, tx_outputs: TransactionOutputs) {
         let TransactionOutputs {
             transaction,
@@ -1109,7 +1322,46 @@ impl ExecutionCacheWrite for InMemoryCache {
         }
         */
 
-        write_locks(&self.store, locks_to_delete, new_locks_to_init);
+        // delete old locks
+        for obj_ref in locks_to_delete.iter() {
+            let mut entry = self
+                .get_owned_object_lock_entry(obj_ref)
+                .expect("lock must exist");
+            // NOTE: We just check here that locks exist, not that they are locked to a specific TX. Why?
+            // 1. Lock existence prevents re-execution of old certs when objects have been upgraded
+            // 2. Not all validators lock, just 2f+1, so transaction should proceed regardless
+            //    (But the lock should exist which means previous transactions finished)
+            // 3. Equivocation possible (different TX) but as long as 2f+1 approves current TX its
+            //    fine
+            assert!(
+                matches!(entry.get(), LockEntry::Lock(_)),
+                "lock must exist for {:?}",
+                obj_ref
+            );
+            *entry.get_mut() = LockEntry::Deleted;
+        }
+
+        // create new locks
+        for obj_ref in new_locks_to_init.iter() {
+            #[cfg(debug_assertions)]
+            {
+                assert!(
+                    // genesis objects are inserted *prior* to executing the genesis transaction
+                    // so we need a loophole for anything that might be a genesis object.
+                    self.store.get_lock_entry(*obj_ref).is_err() || obj_ref.1.value() == 1,
+                    "lock must not exist in store {:?}",
+                    obj_ref
+                );
+                assert!(
+                    self.owned_object_transaction_locks.get(obj_ref).is_none(),
+                    "lock must not exist in cache {:?}",
+                    obj_ref
+                );
+            }
+
+            self.owned_object_transaction_locks
+                .insert(*obj_ref, LockEntry::Lock(None));
+        }
 
         let tx_digest = *transaction.digest();
         let effects_digest = effects.digest();

@@ -1056,7 +1056,7 @@ impl AuthorityState {
     }
 
     async fn check_owned_locks(&self, owned_object_refs: &[ObjectRef]) -> SuiResult {
-        self.database
+        self.execution_cache
             .check_owned_object_locks_exist(owned_object_refs)
     }
 
@@ -2577,6 +2577,22 @@ impl AuthorityState {
         self.execution_lock.write().await
     }
 
+    /// Acquire the execution lock while setting transaction locks during signing.
+    pub async fn execution_lock_for_signing(
+        &self,
+        epoch_id: EpochId,
+    ) -> SuiResult<ExecutionLockReadGuard> {
+        let lock = self.execution_lock.read().await;
+        if *lock == epoch_id {
+            Ok(lock)
+        } else {
+            Err(SuiError::WrongEpoch {
+                expected_epoch: *lock,
+                actual_epoch: epoch_id,
+            })
+        }
+    }
+
     #[instrument(level = "error", skip_all)]
     pub async fn reconfigure(
         &self,
@@ -3860,10 +3876,15 @@ impl AuthorityState {
     ) -> SuiResult {
         let tx_digest = *transaction.digest();
 
+        let epoch = epoch_store.epoch();
+        let execution_lock = self.execution_lock_for_signing(epoch).await?;
+
         // Acquire the lock on input objects
-        self.database
-            .acquire_transaction_locks(epoch_store.epoch(), owned_input_objects, tx_digest)
-            .await?;
+        self.execution_cache.acquire_transaction_locks(
+            &execution_lock,
+            owned_input_objects,
+            tx_digest,
+        )?;
 
         // Write transactions after because if we write before, there is a chance the lock can fail
         // and this can cause invalid transactions to be inserted in the table.

@@ -17,7 +17,7 @@ use fastcrypto::hash::{HashFunction, MultisetHash, Sha3_256};
 use futures::stream::FuturesUnordered;
 use move_core_types::resolver::ModuleResolver;
 use serde::{Deserialize, Serialize};
-use sui_storage::mutex_table::{MutexGuard, MutexTable, RwLockGuard, RwLockTable};
+use sui_storage::mutex_table::{RwLockGuard, RwLockTable};
 use sui_types::accumulator::Accumulator;
 use sui_types::digests::TransactionEventsDigest;
 use sui_types::error::UserInputError;
@@ -115,9 +115,6 @@ impl AuthorityStoreMetrics {
 /// authorities or non-authorities. Specifically, when storing transactions and effects,
 /// S allows SuiDataStore to either store the authority signed version or unsigned version.
 pub struct AuthorityStore {
-    /// Internal vector of locks to manage concurrent writes to the database
-    mutex_table: MutexTable<ObjectDigest>,
-
     pub(crate) perpetual_tables: Arc<AuthorityPerpetualTables>,
 
     // Implementation detail to support notify_read_effects().
@@ -229,7 +226,6 @@ impl AuthorityStore {
         registry: &Registry,
     ) -> SuiResult<Arc<Self>> {
         let store = Arc::new(Self {
-            mutex_table: MutexTable::new(NUM_SHARDS),
             perpetual_tables,
             executed_effects_notify_read: NotifyRead::new(),
             executed_effects_digests_notify_read: NotifyRead::new(),
@@ -513,13 +509,6 @@ impl AuthorityStore {
     /// Returns true if there are no objects in the database
     pub fn database_is_empty(&self) -> SuiResult<bool> {
         self.perpetual_tables.database_is_empty()
-    }
-
-    /// A function that acquires all locks associated with the objects (in order to avoid deadlocks).
-    async fn acquire_locks(&self, input_objects: &[ObjectRef]) -> Vec<MutexGuard> {
-        self.mutex_table
-            .acquire_locks(input_objects.iter().map(|(_, _, digest)| *digest))
-            .await
     }
 
     pub fn object_exists_by_key(
@@ -843,6 +832,8 @@ impl AuthorityStore {
             deleted,
             written,
             events,
+            locks_to_delete,
+            new_locks_to_init,
             ..
         } = tx_outputs;
 
@@ -929,27 +920,11 @@ impl AuthorityStore {
 
         write_batch.insert_batch(&self.perpetual_tables.events, events)?;
 
-        // TODO(cache): once we cache locks (see TODO in in_mem_execution_cache.rs) we will have to
-        // re-enable this code
-        /*
-
-        // NOTE: We just check here that locks exist, not that they are locked to a specific TX. Why?
-        // 1. Lock existence prevents re-execution of old certs when objects have been upgraded
-        // 2. Not all validators lock, just 2f+1, so transaction should proceed regardless
-        //    (But the lock should exist which means previous transactions finished)
-        // 3. Equivocation possible (different TX) but as long as 2f+1 approves current TX its
-        //    fine
-        // 4. Locks may have existed when we started processing this tx, but could have since
-        //    been deleted by a concurrent tx that finished first. In that case, check if the
-        //    tx effects exist.
-        self.check_owned_object_locks_exist(&locks_to_delete)?;
-
         self.initialize_locks_impl(&mut write_batch, &new_locks_to_init, false)?;
 
         // Note: deletes locks for received objects as well (but not for objects that were in
         // `Receiving` arguments which were not received)
         self.delete_locks(&mut write_batch, &locks_to_delete)?;
-        */
 
         write_batch
             .insert_batch(
@@ -990,89 +965,37 @@ impl AuthorityStore {
         Ok(())
     }
 
-    /// Acquires a lock for a transaction on the given objects if they have all been initialized previously
-    pub(crate) async fn acquire_transaction_locks(
+    pub(crate) fn write_locks(
         &self,
-        epoch: EpochId,
-        owned_input_objects: &[ObjectRef],
-        tx_digest: TransactionDigest,
+        locks_to_write: &[(ObjectRef, Option<LockDetailsWrapper>)],
     ) -> SuiResult {
-        // Other writers may be attempting to acquire locks on the same objects, so a mutex is
-        // required.
-        // TODO: replace with optimistic db_transactions (i.e. set lock to tx if none)
-        let _mutexes = self.acquire_locks(owned_input_objects).await;
+        trace!(?locks_to_write, "Writing locks");
+        let mut batch = self.perpetual_tables.owned_object_transaction_locks.batch();
+        batch.insert_batch(
+            &self.perpetual_tables.owned_object_transaction_locks,
+            locks_to_write
+                .iter()
+                .map(|(obj_ref, lock)| (*obj_ref, lock.clone())),
+        )?;
+        batch.write()?;
+        Ok(())
+    }
 
-        trace!(?owned_input_objects, "acquire_locks");
-        let mut locks_to_write = Vec::new();
-
-        let locks = self
+    pub(crate) fn get_lock_entry(&self, obj_ref: ObjectRef) -> SuiResult<Option<LockDetails>> {
+        let lock = self
             .perpetual_tables
             .owned_object_transaction_locks
-            .multi_get(owned_input_objects)?;
+            .get(&obj_ref)?;
 
-        for ((i, lock), obj_ref) in locks.into_iter().enumerate().zip(owned_input_objects) {
-            // The object / version must exist, and therefore lock initialized.
-            if lock.is_none() {
-                let latest_lock = self.get_latest_lock_for_object_id(obj_ref.0)?;
-                fp_bail!(UserInputError::ObjectVersionUnavailableForConsumption {
-                    provided_obj_ref: *obj_ref,
-                    current_version: latest_lock.1
-                }
-                .into());
-            }
-            // Safe to unwrap as it is checked above
-            let lock = lock.unwrap().map(|l| l.migrate().into_inner());
-
-            if let Some(LockDetails {
-                epoch: previous_epoch,
-                tx_digest: previous_tx_digest,
-            }) = &lock
-            {
-                fp_ensure!(
-                    &epoch >= previous_epoch,
-                    SuiError::ObjectLockedAtFutureEpoch {
-                        obj_refs: owned_input_objects.to_vec(),
-                        locked_epoch: *previous_epoch,
-                        new_epoch: epoch,
-                        locked_by_tx: *previous_tx_digest,
-                    }
-                );
-                // Lock already set to different transaction from the same epoch.
-                // If the lock is set in a previous epoch, it's ok to override it.
-                if previous_epoch == &epoch && previous_tx_digest != &tx_digest {
-                    // TODO: add metrics here
-                    info!(prev_tx_digest = ?previous_tx_digest,
-                          cur_tx_digest = ?tx_digest,
-                          "Cannot acquire lock: conflicting transaction!");
-                    return Err(SuiError::ObjectLockConflict {
-                        obj_ref: *obj_ref,
-                        pending_transaction: *previous_tx_digest,
-                    });
-                }
-                if &epoch == previous_epoch {
-                    // Exactly the same epoch and same transaction, nothing to lock here.
-                    continue;
-                } else {
-                    info!(prev_epoch =? previous_epoch, cur_epoch =? epoch, "Overriding an old lock from previous epoch");
-                    // Fall through and override the old lock.
-                }
-            }
-            let obj_ref = owned_input_objects[i];
-            let lock_details = LockDetails { epoch, tx_digest };
-            locks_to_write.push((obj_ref, Some(lock_details.into())));
+        match lock {
+            Some(lock_details) => Ok(lock_details.map(|l| l.migrate().into_inner())),
+            None => Err(SuiError::UserInputError {
+                error: UserInputError::ObjectNotFound {
+                    object_id: obj_ref.0,
+                    version: Some(obj_ref.1),
+                },
+            }),
         }
-
-        if !locks_to_write.is_empty() {
-            trace!(?locks_to_write, "Writing locks");
-            let mut batch = self.perpetual_tables.owned_object_transaction_locks.batch();
-            batch.insert_batch(
-                &self.perpetual_tables.owned_object_transaction_locks,
-                locks_to_write,
-            )?;
-            batch.write()?;
-        }
-
-        Ok(())
     }
 
     /// Gets ObjectLockInfo that represents state of lock on an object.
