@@ -743,13 +743,12 @@ impl AuthorityStore {
         Ok(())
     }
 
-    pub async fn set_epoch_start_configuration(
+    pub fn set_epoch_start_configuration(
         &self,
         epoch_start_configuration: &EpochStartConfiguration,
     ) -> SuiResult {
         self.perpetual_tables
-            .set_epoch_start_configuration(epoch_start_configuration)
-            .await?;
+            .set_epoch_start_configuration(epoch_start_configuration)?;
         Ok(())
     }
 
@@ -1208,7 +1207,7 @@ impl AuthorityStore {
     /// so that when we receive the checkpoint that includes it from state
     /// sync, we are able to execute the checkpoint.
     /// TODO: implement GC for transactions that are no longer needed.
-    pub async fn revert_state_update(&self, tx_digest: &TransactionDigest) -> SuiResult {
+    pub fn revert_state_update(&self, tx_digest: &TransactionDigest) -> SuiResult {
         let Some(effects) = self.get_executed_effects(tx_digest)? else {
             debug!("Not reverting {:?} as it was not executed", tx_digest);
             return Ok(());

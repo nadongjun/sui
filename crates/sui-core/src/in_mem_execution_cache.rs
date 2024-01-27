@@ -1,9 +1,11 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::authority::authority_notify_read::EffectsNotifyRead;
 use crate::authority::authority_store::SuiLockResult;
 use crate::authority::AuthorityStore;
+use crate::authority::{
+    authority_notify_read::EffectsNotifyRead, epoch_start_configuration::EpochStartConfiguration,
+};
 use crate::transaction_outputs::TransactionOutputs;
 use async_trait::async_trait;
 
@@ -480,6 +482,14 @@ pub trait ExecutionCacheWrite: Send + Sync {
     ) -> BoxFuture<'a, SuiResult>;
 }
 
+pub trait ExecutionCacheReconfigAPI: Send + Sync {
+    fn revert_state_update(&self, digest: &TransactionDigest) -> SuiResult;
+    fn set_epoch_start_configuration(
+        &self,
+        epoch_start_config: &EpochStartConfiguration,
+    ) -> SuiResult;
+}
+
 pub struct PassthroughCache {
     store: Arc<AuthorityStore>,
     metrics: Option<ExecutionCacheMetrics>,
@@ -700,6 +710,19 @@ impl ExecutionCacheWrite for PassthroughCache {
         self.store
             .acquire_transaction_locks(epoch_id, owned_input_objects, tx_digest)
             .boxed()
+    }
+}
+
+impl ExecutionCacheReconfigAPI for PassthroughCache {
+    fn revert_state_update(&self, digest: &TransactionDigest) -> SuiResult {
+        self.store.revert_state_update(digest)
+    }
+
+    fn set_epoch_start_configuration(
+        &self,
+        epoch_start_config: &EpochStartConfiguration,
+    ) -> SuiResult {
+        self.store.set_epoch_start_configuration(epoch_start_config)
     }
 }
 

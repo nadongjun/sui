@@ -138,7 +138,9 @@ use crate::checkpoints::CheckpointStore;
 use crate::consensus_adapter::ConsensusAdapter;
 use crate::epoch::committee_store::CommitteeStore;
 use crate::execution_driver::execution_process;
-use crate::in_mem_execution_cache::{ExecutionCache, ExecutionCacheRead, ExecutionCacheWrite};
+use crate::in_mem_execution_cache::{
+    ExecutionCache, ExecutionCacheRead, ExecutionCacheReconfigAPI, ExecutionCacheWrite,
+};
 use crate::metrics::LatencyObserver;
 use crate::module_cache_metrics::ResolverMetrics;
 use crate::stake_aggregator::StakeAggregator;
@@ -641,7 +643,7 @@ pub struct AuthorityState {
     input_loader: TransactionInputLoader,
     execution_cache: Arc<ExecutionCache>,
 
-    pub database: Arc<AuthorityStore>, // TODO: remove pub
+    pub _database: Arc<AuthorityStore>, // TODO: remove pub
 
     epoch_store: ArcSwap<AuthorityPerEpochStore>,
 
@@ -1066,7 +1068,7 @@ impl AuthorityState {
     }
 
     async fn check_owned_locks(&self, owned_object_refs: &[ObjectRef]) -> SuiResult {
-        self.database
+        self._database
             .check_owned_object_locks_exist(owned_object_refs)
     }
 
@@ -1094,7 +1096,7 @@ impl AuthorityState {
             tx_digest,
             effects,
             expected_effects_digest,
-            &self.database,
+            &self.execution_cache,
             &epoch_store,
             inner_temporary_store,
             certificate,
@@ -1115,7 +1117,7 @@ impl AuthorityState {
         let digest = *certificate.digest();
         // The cert could have been processed by a concurrent attempt of the same cert, so check if
         // the effects have already been written.
-        if let Some(effects) = self.database.get_executed_effects(&digest)? {
+        if let Some(effects) = self.execution_cache.get_executed_effects(&digest)? {
             tx_guard.release();
             return Ok((effects, None));
         }
@@ -1221,7 +1223,7 @@ impl AuthorityState {
 
             // double check that the signature verifier always matches the authenticator state
             if cfg!(debug_assertions) {
-                let authenticator_state = get_authenticator_state(&self.database)
+                let authenticator_state = get_authenticator_state(&self.execution_cache)
                     .expect("Read cannot fail")
                     .expect("Authenticator state must exist");
 
@@ -2437,7 +2439,7 @@ impl AuthorityState {
             epoch_store: ArcSwap::new(epoch_store.clone()),
             input_loader,
             execution_cache,
-            database: store,
+            _database: store,
             indexes,
             subscription_handler: Arc::new(SubscriptionHandler::new(prometheus_registry)),
             checkpoint_store,
@@ -2506,9 +2508,9 @@ impl AuthorityState {
         let archive_readers =
             ArchiveReaderBalancer::new(config.archive_reader_config(), &Registry::default())?;
         AuthorityStorePruner::prune_checkpoints_for_eligible_epochs(
-            &self.database.perpetual_tables,
+            &self._database.perpetual_tables,
             &self.checkpoint_store,
-            &self.database.objects_lock_table,
+            &self._database.objects_lock_table,
             config.authority_store_pruning_config,
             metrics,
             config.indirect_objects_threshold,
@@ -2543,7 +2545,7 @@ impl AuthorityState {
         // at epoch boundaries (during reconfiguration). Therefore any entries that currently
         // exist can be removed. Because of this we can use the `schedule_delete_all` method.
         Ok(self
-            .database
+            ._database
             .perpetual_tables
             .object_per_epoch_marker_table
             .schedule_delete_all()?)
@@ -2653,9 +2655,8 @@ impl AuthorityState {
                 .protocol_version(),
         );
         self.clear_object_per_epoch_marker_table(&execution_lock)?;
-        self.db()
-            .set_epoch_start_configuration(&epoch_start_configuration)
-            .await?;
+        self.execution_cache
+            .set_epoch_start_configuration(&epoch_start_configuration)?;
         if let Some(checkpoint_path) = &self.db_checkpoint_config.checkpoint_path {
             if self
                 .db_checkpoint_config
@@ -2751,7 +2752,7 @@ impl AuthorityState {
                     );
                     let mut object_scanned: u64 = 0;
                     let mut wrapped_objects_to_remove = vec![];
-                    for db_result in self.database.perpetual_tables.objects.safe_range_iter(
+                    for db_result in self._database.perpetual_tables.objects.safe_range_iter(
                         ObjectKey::min_for_id(&start_id)..=ObjectKey::max_for_id(&end_id),
                     ) {
                         match db_result {
@@ -2791,7 +2792,7 @@ impl AuthorityState {
                 }));
             }
             let (last_checkpoint_of_epoch, cur_accumulator) = self
-                .database
+                ._database
                 .get_root_state_accumulator(cur_epoch_store.epoch());
             let (accumulator, total_objects_scanned, total_wrapped_objects) =
                 pending_tasks.into_iter().fold(
@@ -2820,7 +2821,7 @@ impl AuthorityState {
                 "[Re-accumulate] New accumulator value: {:?}",
                 accumulator.digest()
             );
-            self.database
+            self._database
                 .perpetual_tables
                 .root_state_hash_by_epoch
                 .insert(
@@ -2849,7 +2850,7 @@ impl AuthorityState {
         );
 
         if let Err(err) = self
-            .database
+            ._database
             .expensive_check_sui_conservation(cur_epoch_store)
         {
             if cfg!(debug_assertions) {
@@ -2869,7 +2870,7 @@ impl AuthorityState {
                 "Performing state consistency check for epoch {}",
                 cur_epoch_store.epoch()
             );
-            self.database.expensive_check_is_consistent_state(
+            self._database.expensive_check_is_consistent_state(
                 checkpoint_executor,
                 accumulator,
                 cur_epoch_store,
@@ -2879,14 +2880,14 @@ impl AuthorityState {
 
         if expensive_safety_check_config.enable_secondary_index_checks() {
             if let Some(indexes) = self.indexes.clone() {
-                verify_indexes(self.database.clone(), indexes)
+                verify_indexes(self._database.clone(), indexes)
                     .expect("secondary indexes are inconsistent");
             }
         }
     }
 
-    pub fn db(&self) -> Arc<AuthorityStore> {
-        self.database.clone()
+    pub fn _db(&self) -> Arc<AuthorityStore> {
+        self._database.clone()
     }
 
     pub fn current_epoch_for_testing(&self) -> EpochId {
@@ -2926,7 +2927,7 @@ impl AuthorityState {
         self.checkpoint_store
             .checkpoint_db(&checkpoint_path_tmp.join("checkpoints"))?;
 
-        self.database
+        self._database
             .perpetual_tables
             .checkpoint_db(&store_checkpoint_path_tmp.join("perpetual"))?;
         self.committee_store
@@ -3688,6 +3689,7 @@ impl AuthorityState {
     }
 
     pub async fn insert_genesis_object(&self, object: Object) {
+        // TODO(cache)
         self.database
             .insert_genesis_object(object)
             .expect("Cannot insert genesis object")
@@ -4027,7 +4029,7 @@ impl AuthorityState {
                 .unwrap_or(modules);
 
             let Some(obj_ref) = sui_framework::compare_system_package(
-                self.database.as_ref(),
+                &self.execution_cache,
                 system_package.id(),
                 &modules,
                 system_package.dependencies().to_vec(),
@@ -4479,6 +4481,7 @@ impl AuthorityState {
         // We must write tx and effects to the state sync tables so that state sync is able to
         // deliver to the transaction to CheckpointExecutor after it is included in a certified
         // checkpoint.
+        // TODO(cache) - state sync trait pls
         self.database
             .insert_transaction_and_effects(&tx, &effects)
             .map_err(|err| {
@@ -4528,7 +4531,7 @@ impl AuthorityState {
                 continue;
             }
             info!("Reverting {:?} at the end of epoch", digest);
-            self.database.revert_state_update(&digest).await?;
+            self.execution_cache.revert_state_update(&digest)?;
         }
         info!("All uncommitted local transactions reverted");
         Ok(())
@@ -4895,7 +4898,7 @@ impl NodeStateDump {
         tx_digest: &TransactionDigest,
         effects: &TransactionEffects,
         expected_effects_digest: TransactionEffectsDigest,
-        authority_store: &Arc<AuthorityStore>,
+        object_store: &dyn ObjectStore,
         epoch_store: &Arc<AuthorityPerEpochStore>,
         inner_temporary_store: &InnerTemporaryStore,
         certificate: &VerifiedExecutableTransaction,
@@ -4910,7 +4913,7 @@ impl NodeStateDump {
         // Record all system packages at this version
         let mut relevant_system_packages = Vec::new();
         for sys_package_id in BuiltInFramework::all_package_ids() {
-            if let Some(w) = authority_store.get_object(&sys_package_id)? {
+            if let Some(w) = object_store.get_object(&sys_package_id)? {
                 relevant_system_packages.push(w)
             }
         }
@@ -4920,7 +4923,7 @@ impl NodeStateDump {
         for kind in effects.input_shared_objects() {
             match kind {
                 InputSharedObject::Mutate(obj_ref) | InputSharedObject::ReadOnly(obj_ref) => {
-                    if let Some(w) = authority_store.get_object_by_key(&obj_ref.0, obj_ref.1)? {
+                    if let Some(w) = object_store.get_object_by_key(&obj_ref.0, obj_ref.1)? {
                         shared_objects.push(w)
                     }
                 }
@@ -4932,7 +4935,7 @@ impl NodeStateDump {
         // Child objects which are read but not mutated are not tracked anywhere else
         let mut loaded_child_objects = Vec::new();
         for (id, meta) in &inner_temporary_store.loaded_runtime_objects {
-            if let Some(w) = authority_store.get_object_by_key(id, meta.version)? {
+            if let Some(w) = object_store.get_object_by_key(id, meta.version)? {
                 loaded_child_objects.push(w)
             }
         }
@@ -4940,7 +4943,7 @@ impl NodeStateDump {
         // Record all modified objects
         let mut modified_at_versions = Vec::new();
         for (id, ver) in effects.modified_at_versions() {
-            if let Some(w) = authority_store.get_object_by_key(&id, ver)? {
+            if let Some(w) = object_store.get_object_by_key(&id, ver)? {
                 modified_at_versions.push(w)
             }
         }
