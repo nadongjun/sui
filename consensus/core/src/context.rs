@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
+#[cfg(test)]
+use tempfile::TempDir;
 
 use consensus_config::{AuthorityIndex, Committee, Parameters};
 use sui_protocol_config::ProtocolConfig;
@@ -54,11 +56,15 @@ impl Context {
     ) -> (Self, Vec<(NetworkKeyPair, ProtocolKeyPair)>) {
         let (committee, keypairs) = Committee::new_for_test(0, vec![1; committee_size]);
         let metrics = test_metrics();
+        let temp_dir = TempDir::new().unwrap();
 
         let context = Context::new(
             AuthorityIndex::new_for_test(0),
             committee,
-            Parameters::default(),
+            Parameters {
+                db_path: temp_dir.into_path(),
+                ..Default::default()
+            },
             Self::default_protocol_config_for_testing(),
             metrics,
         );
