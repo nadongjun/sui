@@ -268,15 +268,11 @@ impl AuthorityStore {
         Ok(acc.1.digest().into())
     }
 
-    pub fn get_root_state_accumulator(
+    pub fn get_root_state_accumulator_for_epoch(
         &self,
         epoch: EpochId,
-    ) -> (CheckpointSequenceNumber, Accumulator) {
-        self.perpetual_tables
-            .root_state_hash_by_epoch
-            .get(&epoch)
-            .unwrap()
-            .unwrap()
+    ) -> SuiResult<Option<(CheckpointSequenceNumber, Accumulator)>> {
+        self.perpetual_tables.root_state_hash_by_epoch.get(&epoch)
     }
 
     pub fn get_recovery_epoch_at_restart(&self) -> SuiResult<EpochId> {

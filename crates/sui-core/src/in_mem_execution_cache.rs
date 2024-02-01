@@ -775,11 +775,17 @@ impl AccumulatorReadStore for PassthroughCache {
         self.store.get_object_ref_prior_to_key(object_id, version)
     }
 
-    fn get_root_state_hash_for_epoch(
+    fn get_root_state_accumulator_for_epoch(
         &self,
         epoch: EpochId,
     ) -> SuiResult<Option<(CheckpointSequenceNumber, Accumulator)>> {
-        self.store.get_root_state_hash_for_epoch(epoch)
+        self.store.get_root_state_accumulator_for_epoch(epoch)
+    }
+
+    fn get_root_state_accumulator_for_highest_epoch(
+        &self,
+    ) -> SuiResult<Option<(EpochId, (CheckpointSequenceNumber, Accumulator))>> {
+        self.store.get_root_state_accumulator_for_highest_epoch()
     }
 }
 

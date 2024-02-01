@@ -43,9 +43,13 @@ pub trait AccumulatorReadStore {
         version: VersionNumber,
     ) -> SuiResult<Option<ObjectRef>>;
 
-    fn get_root_state_hash_for_epoch(
+    fn get_root_state_accumulator_for_epoch(
         &self,
         epoch: EpochId,
+    ) -> SuiResult<Option<(CheckpointSequenceNumber, Accumulator)>>;
+
+    fn get_root_state_accumulator_for_highest_epoch(
+        &self,
     ) -> SuiResult<Option<(CheckpointSequenceNumber, Accumulator)>>;
 }
 
@@ -62,11 +66,17 @@ impl AccumulatorReadStore for AuthorityStore {
         self.get_object_ref_prior_to_key(object_id, version)
     }
 
-    fn get_root_state_hash_for_epoch(
+    fn get_root_state_accumulator_for_epoch(
         &self,
         epoch: EpochId,
     ) -> SuiResult<Option<(CheckpointSequenceNumber, Accumulator)>> {
-        self.store.get_root_state_hash_for_epoch(epoch)
+        self.store.get_root_state_accumulator_for_epoch(epoch)
+    }
+
+    fn get_root_state_accumulator_for_highest_epoch(
+        &self,
+    ) -> SuiResult<Option<(CheckpointSequenceNumber, Accumulator)>> {
+        self.store.get_root_state_accumulator_for_highest_epoch()
     }
 }
 
@@ -87,9 +97,15 @@ impl AccumulatorReadStore for InMemoryStorage {
         unreachable!("get_object_ref_prior_to_key is only called by accumulate_effects_v1, while InMemoryStorage is used by testing and genesis only, which always uses latest protocol ")
     }
 
-    fn get_root_state_hash_for_epoch(
+    fn get_root_state_accumulator_for_epoch(
         &self,
         epoch: EpochId,
+    ) -> SuiResult<Option<(CheckpointSequenceNumber, Accumulator)>> {
+        unreachable!("not used for testing")
+    }
+
+    fn get_root_state_accumulator_for_highest_epoch(
+        &self,
     ) -> SuiResult<Option<(CheckpointSequenceNumber, Accumulator)>> {
         unreachable!("not used for testing")
     }
@@ -390,15 +406,26 @@ impl StateAccumulator {
         last_checkpoint_of_epoch: CheckpointSequenceNumber,
         epoch_store: Arc<AuthorityPerEpochStore>,
     ) -> SuiResult<Accumulator> {
-        if let Some((_checkpoint, acc)) = self
-            .store
-            .get_root_state_hash_for_epoch(epoch)?
-        {
+        if let Some((_checkpoint, acc)) = self.store.get_root_state_accumulator_for_epoch(epoch)? {
             return Ok(acc);
         }
 
         // Get the next checkpoint to accumulate (first checkpoint of the epoch)
         // by adding 1 to the highest checkpoint of the previous epoch
+        let (highest_epoch, (next_to_accumulate, mut root_state_accumulator)) = self
+            .store
+            .get_root_state_accumulator_for_highest_epoch()?
+            .map(|(epoch, (highest, hash))| {
+                (
+                    epoch,
+                    (
+                        highest.checked_add(1).expect("Overflowed u64 for epoch ID"),
+                        hash,
+                    ),
+                )
+            })
+            .unwrap_or((0, (0, Accumulator::default())));
+
         let (_, (next_to_accumulate, mut root_state_hash)) = self
             .authority_store
             .perpetual_tables
