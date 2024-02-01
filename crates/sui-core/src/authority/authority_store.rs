@@ -145,9 +145,7 @@ impl AuthorityStore {
                 *genesis.checkpoint().digest(),
                 &genesis.objects(),
             )?;
-            perpetual_tables
-                .set_epoch_start_configuration(&epoch_start_configuration)
-                .await?;
+            perpetual_tables.set_epoch_start_configuration(&epoch_start_configuration)?;
             epoch_start_configuration
         } else {
             info!("Loading epoch start config from DB");
@@ -229,7 +227,6 @@ impl AuthorityStore {
         {
             store
                 .bulk_insert_genesis_objects(genesis.objects())
-                .await
                 .expect("Cannot bulk insert genesis objects");
 
             // insert txn and effects of genesis
@@ -641,7 +638,7 @@ impl AuthorityStore {
     }
 
     /// This function should only be used for initializing genesis and should remain private.
-    pub(super) async fn bulk_insert_genesis_objects(&self, objects: &[Object]) -> SuiResult<()> {
+    pub(crate) fn bulk_insert_genesis_objects(&self, objects: &[Object]) -> SuiResult<()> {
         let mut batch = self.perpetual_tables.objects.batch();
         let ref_and_objects: Vec<_> = objects
             .iter()

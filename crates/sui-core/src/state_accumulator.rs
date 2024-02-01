@@ -29,7 +29,7 @@ use crate::authority::authority_store_tables::LiveObject;
 use crate::authority::AuthorityStore;
 
 pub struct StateAccumulator {
-    authority_store: Arc<AuthorityStore>,
+    store: Arc<dyn AccumulatorReadStore>,
 }
 
 pub trait AccumulatorReadStore {
@@ -42,6 +42,11 @@ pub trait AccumulatorReadStore {
         object_id: &ObjectID,
         version: VersionNumber,
     ) -> SuiResult<Option<ObjectRef>>;
+
+    fn get_root_state_hash_for_epoch(
+        &self,
+        epoch: EpochId,
+    ) -> SuiResult<Option<(CheckpointSequenceNumber, Accumulator)>>;
 }
 
 impl AccumulatorReadStore for AuthorityStore {
@@ -55,6 +60,13 @@ impl AccumulatorReadStore for AuthorityStore {
         version: VersionNumber,
     ) -> SuiResult<Option<ObjectRef>> {
         self.get_object_ref_prior_to_key(object_id, version)
+    }
+
+    fn get_root_state_hash_for_epoch(
+        &self,
+        epoch: EpochId,
+    ) -> SuiResult<Option<(CheckpointSequenceNumber, Accumulator)>> {
+        self.store.get_root_state_hash_for_epoch(epoch)
     }
 }
 
@@ -73,6 +85,13 @@ impl AccumulatorReadStore for InMemoryStorage {
         _version: VersionNumber,
     ) -> SuiResult<Option<ObjectRef>> {
         unreachable!("get_object_ref_prior_to_key is only called by accumulate_effects_v1, while InMemoryStorage is used by testing and genesis only, which always uses latest protocol ")
+    }
+
+    fn get_root_state_hash_for_epoch(
+        &self,
+        epoch: EpochId,
+    ) -> SuiResult<Option<(CheckpointSequenceNumber, Accumulator)>> {
+        unreachable!("not used for testing")
     }
 }
 
@@ -324,8 +343,8 @@ fn accumulate_effects_v3(effects: Vec<TransactionEffects>) -> Accumulator {
 }
 
 impl StateAccumulator {
-    pub fn new(authority_store: Arc<AuthorityStore>) -> Self {
-        Self { authority_store }
+    pub fn new(store: Arc<dyn AccumulatorReadStore>) -> Self {
+        Self { store }
     }
 
     /// Accumulates the effects of a single checkpoint and persists the accumulator.
@@ -358,7 +377,7 @@ impl StateAccumulator {
         effects: Vec<TransactionEffects>,
         protocol_config: &ProtocolConfig,
     ) -> Accumulator {
-        accumulate_effects(&*self.authority_store, effects, protocol_config)
+        accumulate_effects(&*self.store, effects, protocol_config)
     }
 
     /// Unions all checkpoint accumulators at the end of the epoch to generate the
@@ -372,10 +391,8 @@ impl StateAccumulator {
         epoch_store: Arc<AuthorityPerEpochStore>,
     ) -> SuiResult<Accumulator> {
         if let Some((_checkpoint, acc)) = self
-            .authority_store
-            .perpetual_tables
-            .root_state_hash_by_epoch
-            .get(epoch)?
+            .store
+            .get_root_state_hash_for_epoch(epoch)?
         {
             return Ok(acc);
         }

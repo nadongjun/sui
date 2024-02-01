@@ -6,6 +6,7 @@ use crate::authority::AuthorityStore;
 use crate::authority::{
     authority_notify_read::EffectsNotifyRead, epoch_start_configuration::EpochStartConfiguration,
 };
+use crate::state_accumulator::AccumulatorReadStore;
 use crate::transaction_outputs::TransactionOutputs;
 use async_trait::async_trait;
 
@@ -19,10 +20,12 @@ use prometheus::{register_int_gauge_with_registry, IntGauge, Registry};
 use std::collections::HashSet;
 use std::sync::Arc;
 use sui_storage::package_object_cache::PackageObjectCache;
+use sui_types::accumulator::Accumulator;
 use sui_types::digests::{TransactionDigest, TransactionEffectsDigest, TransactionEventsDigest};
 use sui_types::effects::{TransactionEffects, TransactionEvents};
 use sui_types::error::{SuiError, SuiResult, UserInputError};
 use sui_types::message_envelope::Message;
+use sui_types::messages_checkpoint::CheckpointSequenceNumber;
 use sui_types::object::Object;
 use sui_types::storage::{
     error::{Error as StorageError, Result as StorageResult},
@@ -483,10 +486,24 @@ pub trait ExecutionCacheWrite: Send + Sync {
 }
 
 pub trait ExecutionCacheReconfigAPI: Send + Sync {
+    fn insert_genesis_object(&self, object: Object) -> SuiResult;
+    fn bulk_insert_genesis_objects(&self, objects: &[Object]) -> SuiResult;
+
     fn revert_state_update(&self, digest: &TransactionDigest) -> SuiResult;
     fn set_epoch_start_configuration(
         &self,
         epoch_start_config: &EpochStartConfiguration,
+    ) -> SuiResult;
+}
+
+// StateSyncAPI is for writing any data that was not the result of transaction execution,
+// but that arrived via state sync. The fact that it came via state sync implies that it
+// is certified output, and can be immediately persisted to the store.
+pub trait StateSyncAPI: Send + Sync {
+    fn insert_transaction_and_effects(
+        &self,
+        transaction: &VerifiedTransaction,
+        transaction_effects: &TransactionEffects,
     ) -> SuiResult;
 }
 
@@ -714,6 +731,14 @@ impl ExecutionCacheWrite for PassthroughCache {
 }
 
 impl ExecutionCacheReconfigAPI for PassthroughCache {
+    fn insert_genesis_object(&self, object: Object) -> SuiResult {
+        self.store.insert_genesis_object(object)
+    }
+
+    fn bulk_insert_genesis_objects(&self, objects: &[Object]) -> SuiResult {
+        self.store.bulk_insert_genesis_objects(objects)
+    }
+
     fn revert_state_update(&self, digest: &TransactionDigest) -> SuiResult {
         self.store.revert_state_update(digest)
     }
@@ -723,6 +748,38 @@ impl ExecutionCacheReconfigAPI for PassthroughCache {
         epoch_start_config: &EpochStartConfiguration,
     ) -> SuiResult {
         self.store.set_epoch_start_configuration(epoch_start_config)
+    }
+}
+
+impl StateSyncAPI for PassthroughCache {
+    fn insert_transaction_and_effects(
+        &self,
+        transaction: &VerifiedTransaction,
+        transaction_effects: &TransactionEffects,
+    ) -> SuiResult {
+        self.store
+            .insert_transaction_and_effects(transaction, transaction_effects)
+    }
+}
+
+impl AccumulatorReadStore for PassthroughCache {
+    fn multi_get_object_by_key(&self, object_keys: &[ObjectKey]) -> SuiResult<Vec<Option<Object>>> {
+        self.multi_get_object_by_key(object_keys)
+    }
+
+    fn get_object_ref_prior_to_key_deprecated(
+        &self,
+        object_id: &ObjectID,
+        version: sui_types::base_types::VersionNumber,
+    ) -> SuiResult<Option<ObjectRef>> {
+        self.store.get_object_ref_prior_to_key(object_id, version)
+    }
+
+    fn get_root_state_hash_for_epoch(
+        &self,
+        epoch: EpochId,
+    ) -> SuiResult<Option<(CheckpointSequenceNumber, Accumulator)>> {
+        self.store.get_root_state_hash_for_epoch(epoch)
     }
 }
 

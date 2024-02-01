@@ -140,6 +140,7 @@ use crate::epoch::committee_store::CommitteeStore;
 use crate::execution_driver::execution_process;
 use crate::in_mem_execution_cache::{
     ExecutionCache, ExecutionCacheRead, ExecutionCacheReconfigAPI, ExecutionCacheWrite,
+    StateSyncAPI,
 };
 use crate::metrics::LatencyObserver;
 use crate::module_cache_metrics::ResolverMetrics;
@@ -3690,7 +3691,7 @@ impl AuthorityState {
 
     pub async fn insert_genesis_object(&self, object: Object) {
         // TODO(cache)
-        self.database
+        self.execution_cache
             .insert_genesis_object(object)
             .expect("Cannot insert genesis object")
     }
@@ -4482,7 +4483,7 @@ impl AuthorityState {
         // deliver to the transaction to CheckpointExecutor after it is included in a certified
         // checkpoint.
         // TODO(cache) - state sync trait pls
-        self.database
+        self.execution_cache
             .insert_transaction_and_effects(&tx, &effects)
             .map_err(|err| {
                 let err: anyhow::Error = err.into();
@@ -4616,20 +4617,20 @@ impl AuthorityState {
             ..Default::default()
         };
         let _ = AuthorityStorePruner::prune_objects_for_eligible_epochs(
-            &self.database.perpetual_tables,
+            &self._database.perpetual_tables,
             &self.checkpoint_store,
-            &self.database.objects_lock_table,
+            &self._database.objects_lock_table,
             pruning_config,
             AuthorityStorePruningMetrics::new_for_test(),
             usize::MAX,
         )
         .await;
-        let _ = AuthorityStorePruner::compact(&self.database.perpetual_tables);
+        let _ = AuthorityStorePruner::compact(&self._database.perpetual_tables);
     }
 
     /// NOTE: this function is only to be used for fuzzing and testing. Never use in prod
     pub async fn insert_objects_unsafe_for_testing_only(&self, objects: &[Object]) -> SuiResult {
-        self.database.bulk_insert_genesis_objects(objects).await?;
+        self.execution_cache.bulk_insert_genesis_objects(objects)?;
         self.execution_cache
             .force_reload_system_packages(&BuiltInFramework::all_package_ids());
         Ok(())
