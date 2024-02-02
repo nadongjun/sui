@@ -738,9 +738,8 @@ impl CheckpointCache for PassthroughCache {
         &self,
         digests: &[TransactionDigest],
     ) -> SuiResult<Vec<Option<(EpochId, CheckpointSequenceNumber)>>> {
-        Ok(self
-            .store
-            .deprecated_multi_get_transaction_checkpoint(digests)?)
+        self.store
+            .deprecated_multi_get_transaction_checkpoint(digests)
     }
 
     fn deprecated_insert_finalized_transactions(
