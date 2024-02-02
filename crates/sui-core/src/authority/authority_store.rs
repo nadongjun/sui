@@ -1713,9 +1713,9 @@ impl AccumulatorStore for AuthorityStore {
     ) -> SuiResult {
         self.perpetual_tables
             .root_state_hash_by_epoch
-            .insert(&epoch, &(last_checkpoint_of_epoch, acc))?;
+            .insert(&epoch, &(*last_checkpoint_of_epoch, acc.clone()))?;
         self.root_state_notify_read
-            .notify(&epoch, &(last_checkpoint_of_epoch, acc.clone()));
+            .notify(&epoch, &(*last_checkpoint_of_epoch, acc.clone()));
 
         Ok(())
     }

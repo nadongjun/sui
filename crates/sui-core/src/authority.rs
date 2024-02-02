@@ -2794,7 +2794,9 @@ impl AuthorityState {
             }
             let (last_checkpoint_of_epoch, cur_accumulator) = self
                 .execution_cache
-                .get_root_state_accumulator_for_epoch(cur_epoch_store.epoch());
+                .get_root_state_accumulator_for_epoch(cur_epoch_store.epoch())
+                .expect("read cannot fail")
+                .expect("accumulator must exist");
             let (accumulator, total_objects_scanned, total_wrapped_objects) =
                 pending_tasks.into_iter().fold(
                     (cur_accumulator, 0u64, 0usize),
