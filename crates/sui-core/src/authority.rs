@@ -644,7 +644,7 @@ pub struct AuthorityState {
     input_loader: TransactionInputLoader,
     execution_cache: Arc<ExecutionCache>,
 
-    pub _database: Arc<AuthorityStore>, // TODO: remove pub
+    pub __database: Arc<AuthorityStore>, // TODO: remove pub
 
     epoch_store: ArcSwap<AuthorityPerEpochStore>,
 
