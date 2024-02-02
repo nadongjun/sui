@@ -6,9 +6,10 @@ use std::collections::HashMap;
 use move_binary_format::{
     access::ModuleAccess,
     file_format::{
-        Bytecode, CodeUnit, FunctionDefinition, FunctionDefinitionIndex, FunctionHandleIndex,
-        IdentifierIndex, ModuleHandleIndex, Signature, SignatureToken, StructDefinition,
-        StructDefinitionIndex, StructFieldInformation, StructHandleIndex, TableIndex,
+        Bytecode, CodeUnit,
+        FunctionDefinition, FunctionDefinitionIndex, FunctionHandleIndex, IdentifierIndex,
+        ModuleHandleIndex, Signature, StructHandleIndex, SignatureToken, StructDefinition, StructDefinitionIndex,
+        StructFieldInformation, TableIndex,
     },
     internals::ModuleIndex,
     CompiledModule,
@@ -138,7 +139,7 @@ pub fn in_module(
     // 2 (c). Update ordering for module handles.
     apply_permutation(&mut module.module_handles, modules);
 
-    // 3 (a). Choose ordering for struct handles.
+    // 3 (a). Choose ordering for datatype handles.
     let struct_defs = struct_definition_order(&module.struct_defs);
     let structs = permutation(&module.struct_handles, |ix, handle| {
         if handle.module == module.self_handle_idx() {
@@ -167,7 +168,7 @@ pub fn in_module(
         };
     }
 
-    for Signature(tokens) in &mut module.signatures {
+     for Signature(tokens) in &mut module.signatures {
         for token in tokens {
             remap_signature_token(token, &structs);
         }
@@ -229,7 +230,7 @@ pub fn in_module(
     });
 }
 
-/// Reverses mapping from `StructDefinition(Index)` to `StructHandle`, so that handles for structs
+/// Reverses mapping from `StructDefinition(Index)` to `DatatpeHandle`, so that handles for structs
 /// defined in a module can be arranged in definition order.
 fn struct_definition_order(
     defs: &[StructDefinition],
