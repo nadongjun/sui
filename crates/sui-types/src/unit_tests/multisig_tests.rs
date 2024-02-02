@@ -328,7 +328,7 @@ fn test_multisig_pk_failure() {
     // Fails on empty array length.
     assert!(MultiSigPublicKey::new(vec![pk1.clone(), pk2, pk3], vec![], 2).is_err());
 
-    // Fails on dup pks. 
+    // Fails on dup pks.
     assert!(
         MultiSigPublicKey::new(vec![pk1.clone(), pk1.clone(), pk1], vec![1, 2, 3], 4,).is_err()
     );
@@ -806,7 +806,8 @@ fn multisig_get_pk() {
     let sig1: GenericSignature = Signature::new_secure(&msg, &keys[0]).into();
     let sig2: GenericSignature = Signature::new_secure(&msg, &keys[1]).into();
 
-    let multi_sig = MultiSig::combine(vec![sig1.clone(), sig2.clone()], multisig_pk.clone()).unwrap();
+    let multi_sig =
+        MultiSig::combine(vec![sig1.clone(), sig2.clone()], multisig_pk.clone()).unwrap();
 
     assert!(multi_sig.get_pk().clone() == multisig_pk);
     assert!(
@@ -831,7 +832,6 @@ fn multisig_get_pk() {
 //     let sig2: GenericSignature = Signature::new_secure(&msg, &keys[1]).into();
 
 //     let multi_sig = MultiSig::combine(vec![sig1.clone(), sig2.clone()], multisig_pk).unwrap();
-
 
 // }
 

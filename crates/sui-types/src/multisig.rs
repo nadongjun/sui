@@ -25,6 +25,7 @@ use std::{
     hash::{Hash, Hasher},
     str::FromStr,
 };
+use tracing::info;
 
 use crate::{
     base_types::{EpochId, SuiAddress},
@@ -129,7 +130,13 @@ impl AuthenticatorTrait for MultiSig {
         let digest = hasher.finalize().digest;
         // Verify each signature against its corresponding signature scheme and public key.
         // TODO: further optimization can be done because multiple Ed25519 signatures can be batch verified.
+        info!("tktkbitmap={:?}", self.bitmap);
+        info!("c={:?}", as_indices(self.bitmap));
         for (sig, i) in self.sigs.iter().zip(as_indices(self.bitmap)?) {
+            info!(
+                "verifying sig={:?} index={:?}, map={:?}",
+                sig, i, self.multisig_pk.pk_map
+            );
             let (subsig_pubkey, weight) =
                 self.multisig_pk
                     .pk_map
@@ -137,64 +144,66 @@ impl AuthenticatorTrait for MultiSig {
                     .ok_or(SuiError::InvalidSignature {
                         error: "Invalid public keys index".to_string(),
                     })?;
-            let res =
-                match sig {
-                    CompressedSignature::Ed25519(s) => {
-                        let pk =
-                            Ed25519PublicKey::from_bytes(subsig_pubkey.as_ref()).map_err(|_| {
-                                SuiError::InvalidSignature {
-                                    error: "Invalid ed25519 pk bytes".to_string(),
-                                }
-                            })?;
-                        pk.verify(
-                            &digest,
-                            &s.try_into().map_err(|_| SuiError::InvalidSignature {
-                                error: "Invalid ed25519 signature bytes".to_string(),
-                            })?,
-                        )
-                    }
-                    CompressedSignature::Secp256k1(s) => {
-                        let pk = Secp256k1PublicKey::from_bytes(subsig_pubkey.as_ref()).map_err(
-                            |_| SuiError::InvalidSignature {
+            let res = match sig {
+                CompressedSignature::Ed25519(s) => {
+                    let pk =
+                        Ed25519PublicKey::from_bytes(subsig_pubkey.as_ref()).map_err(|_| {
+                            SuiError::InvalidSignature {
+                                error: "Invalid ed25519 pk bytes".to_string(),
+                            }
+                        })?;
+                    pk.verify(
+                        &digest,
+                        &s.try_into().map_err(|_| SuiError::InvalidSignature {
+                            error: "Invalid ed25519 signature bytes".to_string(),
+                        })?,
+                    )
+                }
+                CompressedSignature::Secp256k1(s) => {
+                    let pk =
+                        Secp256k1PublicKey::from_bytes(subsig_pubkey.as_ref()).map_err(|_| {
+                            SuiError::InvalidSignature {
                                 error: "Invalid k1 pk bytes".to_string(),
-                            },
-                        )?;
-                        pk.verify(
-                            &digest,
-                            &s.try_into().map_err(|_| SuiError::InvalidSignature {
-                                error: "Invalid k1 signature bytes".to_string(),
-                            })?,
-                        )
-                    }
-                    CompressedSignature::Secp256r1(s) => {
-                        let pk = Secp256r1PublicKey::from_bytes(subsig_pubkey.as_ref()).map_err(
-                            |_| SuiError::InvalidSignature {
+                            }
+                        })?;
+                    pk.verify(
+                        &digest,
+                        &s.try_into().map_err(|_| SuiError::InvalidSignature {
+                            error: "Invalid k1 signature bytes".to_string(),
+                        })?,
+                    )
+                }
+                CompressedSignature::Secp256r1(s) => {
+                    let pk =
+                        Secp256r1PublicKey::from_bytes(subsig_pubkey.as_ref()).map_err(|_| {
+                            SuiError::InvalidSignature {
                                 error: "Invalid r1 pk bytes".to_string(),
-                            },
-                        )?;
-                        pk.verify(
-                            &digest,
-                            &s.try_into().map_err(|_| SuiError::InvalidSignature {
-                                error: "Invalid r1 signature bytes".to_string(),
-                            })?,
-                        )
-                    }
-                    CompressedSignature::ZkLogin(z) => {
-                        let authenticator = ZkLoginAuthenticator::from_bytes(&z.0)
-                            .map_err(|_| SuiError::InvalidSignature {
-                                error: "Invalid zklogin authenticator bytes".to_string(),
-                            })?;
-                        authenticator
-                            .verify_claims(value, SuiAddress::from(subsig_pubkey), verify_params)
-                            .map_err(|e| FastCryptoError::GeneralError(e.to_string()))
-                    }
-                };
+                            }
+                        })?;
+                    pk.verify(
+                        &digest,
+                        &s.try_into().map_err(|_| SuiError::InvalidSignature {
+                            error: "Invalid r1 signature bytes".to_string(),
+                        })?,
+                    )
+                }
+                CompressedSignature::ZkLogin(z) => {
+                    let authenticator = ZkLoginAuthenticator::from_bytes(&z.0).map_err(|_| {
+                        SuiError::InvalidSignature {
+                            error: "Invalid zklogin authenticator bytes".to_string(),
+                        }
+                    })?;
+                    authenticator
+                        .verify_claims(value, SuiAddress::from(subsig_pubkey), verify_params)
+                        .map_err(|e| FastCryptoError::GeneralError(e.to_string()))
+                }
+            };
             if res.is_ok() {
                 weight_sum += *weight as u16;
             } else {
                 return res.map_err(|e| SuiError::InvalidSignature {
                     error: format!(
-                        "Invalid sig for pk={:?} address={:?} error={:?}",
+                        "Invalid sig for pk={} address={:?} error={:?}",
                         subsig_pubkey.encode_base64(),
                         SuiAddress::from(subsig_pubkey),
                         e.to_string()
@@ -206,7 +215,10 @@ impl AuthenticatorTrait for MultiSig {
             Ok(())
         } else {
             Err(SuiError::InvalidSignature {
-                error: format!("Insufficient weight={:?} threshold={:?}", weight_sum, self.multisig_pk.threshold),
+                error: format!(
+                    "Insufficient weight={:?} threshold={:?}",
+                    weight_sum, self.multisig_pk.threshold
+                ),
             })
         }
     }
@@ -233,7 +245,7 @@ impl MultiSig {
     /// Create MultiSig from its fields.
     pub fn new(
         sigs: Vec<CompressedSignature>,
-        bitmap: u16,
+        bitmap: BitmapUnit,
         multisig_pk: MultiSigPublicKey,
     ) -> Self {
         Self {

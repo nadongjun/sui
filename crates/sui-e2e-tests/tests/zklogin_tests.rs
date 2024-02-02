@@ -2,21 +2,17 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use fastcrypto::traits::EncodeDecodeBase64;
-use fastcrypto_zkp::bn254::zk_login::ZkLoginInputs;
 use shared_crypto::intent::Intent;
 use shared_crypto::intent::IntentMessage;
 use sui_core::authority_client::AuthorityAPI;
 use sui_macros::sim_test;
 use sui_test_transaction_builder::TestTransactionBuilder;
 use sui_types::base_types::SuiAddress;
-use sui_types::crypto::PublicKey;
-use sui_types::crypto::{Signature, SuiKeyPair};
+use sui_types::crypto::Signature;
 use sui_types::error::{SuiError, SuiResult};
 use sui_types::signature::GenericSignature;
 use sui_types::transaction::Transaction;
 use sui_types::utils::load_test_vectors;
-use sui_types::utils::TestData;
 use sui_types::utils::{
     get_legacy_zklogin_user_address, get_zklogin_user_address, make_zklogin_tx,
 };

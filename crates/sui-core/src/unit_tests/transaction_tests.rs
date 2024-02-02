@@ -19,7 +19,7 @@ use sui_types::{
         AuthenticatorStateUpdate, GenesisTransaction, TransactionDataAPI, TransactionExpiration,
         TransactionKind,
     },
-    utils::{to_sender_signed_transaction, TestData},
+    utils::{load_test_vectors, to_sender_signed_transaction, TestData},
     zk_login_authenticator::ZkLoginAuthenticator,
     zk_login_util::DEFAULT_JWK_BYTES,
 };
@@ -863,6 +863,7 @@ async fn zk_multisig_test() {
 
     // Step 1. construct 2 zklogin signatures
     let test_vectors = load_test_vectors();
+    let mut zklogin_sigs = vec![];
     for (kp, _pk_zklogin, inputs) in test_vectors {
         let intent_message = IntentMessage::new(Intent::sui_transaction(), data.clone());
         let eph_sig = Signature::new_secure(&intent_message, &kp);
