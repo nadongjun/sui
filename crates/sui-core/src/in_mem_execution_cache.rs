@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::authority::authority_store::SuiLockResult;
+use crate::authority::epoch_start_configuration::EpochFlag;
 use crate::authority::AuthorityStore;
 use crate::authority::{
     authority_notify_read::EffectsNotifyRead, epoch_start_configuration::EpochStartConfiguration,
@@ -21,6 +22,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use sui_storage::package_object_cache::PackageObjectCache;
 use sui_types::accumulator::Accumulator;
+use sui_types::base_types::VerifiedExecutionData;
 use sui_types::digests::{TransactionDigest, TransactionEffectsDigest, TransactionEventsDigest};
 use sui_types::effects::{TransactionEffects, TransactionEvents};
 use sui_types::error::{SuiError, SuiResult, UserInputError};
@@ -485,6 +487,29 @@ pub trait ExecutionCacheWrite: Send + Sync {
     ) -> BoxFuture<'a, SuiResult>;
 }
 
+pub trait CheckpointCache: Send + Sync {
+    // TODO: In addition to the deprecated methods below, this will eventually include access
+    // to the CheckpointStore
+
+    // DEPRECATED METHODS
+    fn deprecated_get_transaction_checkpoint(
+        &self,
+        digest: &TransactionDigest,
+    ) -> SuiResult<Option<(EpochId, CheckpointSequenceNumber)>>;
+
+    fn deprecated_multi_get_transaction_checkpoint(
+        &self,
+        digests: &[TransactionDigest],
+    ) -> SuiResult<Vec<Option<(EpochId, CheckpointSequenceNumber)>>>;
+
+    fn deprecated_insert_finalized_transactions(
+        &self,
+        digests: &[TransactionDigest],
+        epoch: EpochId,
+        sequence: CheckpointSequenceNumber,
+    ) -> SuiResult;
+}
+
 pub trait ExecutionCacheReconfigAPI: Send + Sync {
     fn insert_genesis_object(&self, object: Object) -> SuiResult;
     fn bulk_insert_genesis_objects(&self, objects: &[Object]) -> SuiResult;
@@ -494,6 +519,8 @@ pub trait ExecutionCacheReconfigAPI: Send + Sync {
         &self,
         epoch_start_config: &EpochStartConfiguration,
     ) -> SuiResult;
+
+    fn update_epoch_flags_metrics(&self, old: &[EpochFlag], new: &[EpochFlag]);
 }
 
 // StateSyncAPI is for writing any data that was not the result of transaction execution,
@@ -504,6 +531,11 @@ pub trait StateSyncAPI: Send + Sync {
         &self,
         transaction: &VerifiedTransaction,
         transaction_effects: &TransactionEffects,
+    ) -> SuiResult;
+
+    fn multi_insert_transaction_and_effects(
+        &self,
+        transactions_and_effects: &[VerifiedExecutionData],
     ) -> SuiResult;
 }
 
@@ -690,6 +722,34 @@ impl ExecutionCacheRead for PassthroughCache {
     }
 }
 
+impl CheckpointCache for PassthroughCache {
+    fn deprecated_get_transaction_checkpoint(
+        &self,
+        digest: &TransactionDigest,
+    ) -> SuiResult<Option<(EpochId, CheckpointSequenceNumber)>> {
+        self.store.deprecated_get_transaction_checkpoint(digest)
+    }
+
+    fn deprecated_multi_get_transaction_checkpoint(
+        &self,
+        digests: &[TransactionDigest],
+    ) -> SuiResult<Vec<Option<(EpochId, CheckpointSequenceNumber)>>> {
+        Ok(self
+            .store
+            .deprecated_multi_get_transaction_checkpoint(digests)?)
+    }
+
+    fn deprecated_insert_finalized_transactions(
+        &self,
+        digests: &[TransactionDigest],
+        epoch: EpochId,
+        sequence: CheckpointSequenceNumber,
+    ) -> SuiResult {
+        self.store
+            .deprecated_insert_finalized_transactions(digests, epoch, sequence)
+    }
+}
+
 impl ExecutionCacheWrite for PassthroughCache {
     #[instrument(level = "debug", skip_all)]
     fn write_transaction_outputs<'a>(
@@ -749,6 +809,10 @@ impl ExecutionCacheReconfigAPI for PassthroughCache {
     ) -> SuiResult {
         self.store.set_epoch_start_configuration(epoch_start_config)
     }
+
+    fn update_epoch_flags_metrics(&self, old: &[EpochFlag], new: &[EpochFlag]) {
+        self.store.update_epoch_flags_metrics(old, new)
+    }
 }
 
 impl StateSyncAPI for PassthroughCache {
@@ -760,6 +824,15 @@ impl StateSyncAPI for PassthroughCache {
         Ok(self
             .store
             .insert_transaction_and_effects(transaction, transaction_effects)?)
+    }
+
+    fn multi_insert_transaction_and_effects(
+        &self,
+        transactions_and_effects: &[VerifiedExecutionData],
+    ) -> SuiResult {
+        Ok(self
+            .store
+            .multi_insert_transaction_and_effects(transactions_and_effects.iter())?)
     }
 }
 

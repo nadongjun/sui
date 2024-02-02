@@ -321,7 +321,7 @@ impl BenchmarkContext {
                 .insert_verified_checkpoint(&checkpoint)
                 .unwrap();
             state
-                .database
+                ._database
                 .multi_insert_transaction_and_effects(contents.iter())
                 .unwrap();
             state

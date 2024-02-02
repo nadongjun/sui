@@ -1335,7 +1335,7 @@ async fn test_access_old_object_pruned() {
         state.prune_objects_and_compact_for_testing().await;
         // Make sure the old version of the object is already pruned.
         assert!(state
-            .db()
+            .get_object_store()
             .get_object_by_key(&gas_object.0, gas_object.1)
             .unwrap()
             .is_none());

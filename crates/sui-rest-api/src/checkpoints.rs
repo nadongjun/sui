@@ -142,7 +142,7 @@ pub async fn get_full_checkpoint(
             .collect::<Result<Vec<_>>>()?;
 
         let full_transaction = CheckpointTransaction {
-            transaction: tx.into(),
+            transaction: (*tx).clone().into(),
             effects: fx,
             events,
             input_objects,

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use sui_core::authority::AuthorityState;
 use sui_types::committee::EpochId;
 use sui_types::effects::TransactionEffectsAPI;
@@ -16,7 +17,7 @@ use sui_types::{
         CheckpointContents, CheckpointContentsDigest, CheckpointSequenceNumber, VerifiedCheckpoint,
     },
     object::Object,
-    storage::{ObjectKey, ObjectStore},
+    storage::ObjectKey,
     transaction::VerifiedTransaction,
 };
 
@@ -45,7 +46,7 @@ pub trait NodeStateGetter: Sync + Send {
     fn multi_get_transaction_blocks(
         &self,
         tx_digests: &[TransactionDigest],
-    ) -> SuiResult<Vec<Option<VerifiedTransaction>>>;
+    ) -> SuiResult<Vec<Option<Arc<VerifiedTransaction>>>>;
 
     fn multi_get_executed_effects(
         &self,
@@ -178,7 +179,7 @@ pub trait NodeStateGetter: Sync + Send {
                 .collect::<anyhow::Result<Vec<_>>>()?;
 
             let full_transaction = CheckpointTransaction {
-                transaction: tx.into(),
+                transaction: (*tx).clone().into(),
                 effects: fx,
                 events,
                 input_objects,
@@ -220,29 +221,30 @@ impl NodeStateGetter for AuthorityState {
     fn multi_get_transaction_blocks(
         &self,
         tx_digests: &[TransactionDigest],
-    ) -> SuiResult<Vec<Option<VerifiedTransaction>>> {
-        self.database.multi_get_transaction_blocks(tx_digests)
+    ) -> SuiResult<Vec<Option<Arc<VerifiedTransaction>>>> {
+        self.get_cache_reader()
+            .multi_get_transaction_blocks(tx_digests)
     }
 
     fn multi_get_executed_effects(
         &self,
         digests: &[TransactionDigest],
     ) -> SuiResult<Vec<Option<TransactionEffects>>> {
-        self.database.multi_get_executed_effects(digests)
+        self.get_cache_reader().multi_get_executed_effects(digests)
     }
 
     fn multi_get_events(
         &self,
         event_digests: &[TransactionEventsDigest],
     ) -> SuiResult<Vec<Option<TransactionEvents>>> {
-        self.database.multi_get_events(event_digests)
+        self.get_cache_reader().multi_get_events(event_digests)
     }
 
     fn multi_get_object_by_key(
         &self,
         object_keys: &[ObjectKey],
     ) -> Result<Vec<Option<Object>>, SuiError> {
-        self.database.multi_get_object_by_key(object_keys)
+        self.get_cache_reader().multi_get_object_by_key(object_keys)
     }
 
     fn get_object_by_key(
@@ -250,13 +252,15 @@ impl NodeStateGetter for AuthorityState {
         object_id: &ObjectID,
         version: VersionNumber,
     ) -> Result<Option<Object>, SuiError> {
-        self.database
+        self.get_cache_reader()
             .get_object_by_key(object_id, version)
             .map_err(Into::into)
     }
 
     fn get_object(&self, object_id: &ObjectID) -> Result<Option<Object>, SuiError> {
-        self.database.get_object(object_id).map_err(Into::into)
+        self.get_cache_reader()
+            .get_object(object_id)
+            .map_err(Into::into)
     }
 }
 
@@ -296,10 +300,10 @@ impl<T: Sync + Send, W: simulacrum::SimulatorStore + Sync + Send> NodeStateGette
     fn multi_get_transaction_blocks(
         &self,
         tx_digests: &[TransactionDigest],
-    ) -> SuiResult<Vec<Option<VerifiedTransaction>>> {
+    ) -> SuiResult<Vec<Option<Arc<VerifiedTransaction>>>> {
         Ok(tx_digests
             .iter()
-            .map(|digest| self.store().get_transaction(digest))
+            .map(|digest| self.store().get_transaction(digest).map(Arc::new))
             .collect())
     }
 

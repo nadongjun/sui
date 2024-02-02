@@ -1100,11 +1100,13 @@ fn finalize_checkpoint(
         epoch_store.insert_finalized_transactions(tx_digests, checkpoint.sequence_number)?;
     }
     // TODO remove once we no longer need to support this table for read RPC
-    state.database.deprecated_insert_finalized_transactions(
-        tx_digests,
-        epoch_store.epoch(),
-        checkpoint.sequence_number,
-    )?;
+    state
+        .get_checkpoint_cache()
+        .deprecated_insert_finalized_transactions(
+            tx_digests,
+            epoch_store.epoch(),
+            checkpoint.sequence_number,
+        )?;
 
     accumulator.accumulate_checkpoint(effects, checkpoint.sequence_number, epoch_store)?;
     if let Some(path) = data_ingestion_dir {

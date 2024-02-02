@@ -428,7 +428,9 @@ impl StateRead for AuthorityState {
             .await?)
     }
     fn get_system_state(&self) -> StateReadResult<SuiSystemState> {
-        Ok(self.database.get_sui_system_state_object_unsafe()?)
+        Ok(self
+            .get_cache_reader()
+            .get_sui_system_state_object_unsafe()?)
     }
     fn get_or_latest_committee(&self, epoch: Option<BigInt<u64>>) -> StateReadResult<Committee> {
         Ok(self
@@ -520,7 +522,7 @@ impl StateRead for AuthorityState {
         digests: &[TransactionDigest],
     ) -> StateReadResult<Vec<Option<(EpochId, CheckpointSequenceNumber)>>> {
         Ok(self
-            .database
+            .get_checkpoint_cache()
             .deprecated_multi_get_transaction_checkpoint(digests)?)
     }
 
@@ -529,7 +531,7 @@ impl StateRead for AuthorityState {
         digest: &TransactionDigest,
     ) -> StateReadResult<Option<(EpochId, CheckpointSequenceNumber)>> {
         Ok(self
-            .database
+            .get_checkpoint_cache()
             .deprecated_get_transaction_checkpoint(digest)?)
     }
 

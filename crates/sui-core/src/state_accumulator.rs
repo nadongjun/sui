@@ -71,7 +71,7 @@ impl AccumulatorStore for InMemoryStorage {
 
     fn get_root_state_accumulator_for_epoch(
         &self,
-        epoch: EpochId,
+        _epoch: EpochId,
     ) -> SuiResult<Option<(CheckpointSequenceNumber, Accumulator)>> {
         unreachable!("not used for testing")
     }
@@ -84,16 +84,16 @@ impl AccumulatorStore for InMemoryStorage {
 
     fn insert_state_accumulator_for_epoch(
         &self,
-        epoch: EpochId,
-        checkpoint_seq_num: &CheckpointSequenceNumber,
-        acc: &Accumulator,
+        _epoch: EpochId,
+        _checkpoint_seq_num: &CheckpointSequenceNumber,
+        _acc: &Accumulator,
     ) -> SuiResult {
         unreachable!("not used for testing")
     }
 
     fn iter_live_object_set(
         &self,
-        include_wrapped_tombstone: bool,
+        _include_wrapped_tombstone: bool,
     ) -> Box<dyn Iterator<Item = LiveObject> + '_> {
         unreachable!("not used for testing")
     }

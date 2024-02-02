@@ -165,7 +165,7 @@ async fn test_create_authenticator_state_object() {
         h.with(|node| {
             assert!(node
                 .state()
-                .database
+                .get_cache_reader()
                 .get_latest_object_ref_or_tombstone(SUI_AUTHENTICATOR_STATE_OBJECT_ID)
                 .unwrap()
                 .is_none());

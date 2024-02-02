@@ -620,8 +620,11 @@ impl SuiNode {
             .enable_secondary_index_checks()
         {
             if let Some(indexes) = state.indexes.clone() {
-                sui_core::verify_indexes::verify_indexes(state.database.clone(), indexes)
-                    .expect("secondary indexes are inconsistent");
+                sui_core::verify_indexes::verify_indexes(
+                    state.get_execution_cache().as_ref(),
+                    indexes,
+                )
+                .expect("secondary indexes are inconsistent");
             }
         }
 
@@ -1316,9 +1319,11 @@ impl SuiNode {
         self.state.committee_store().clone()
     }
 
+    /*
     pub fn clone_authority_store(&self) -> Arc<AuthorityStore> {
         self.state.db()
     }
+    */
 
     /// Clone an AuthorityAggregator currently used in this node's
     /// QuorumDriver, if the node is a fullnode. After reconfig,
@@ -1412,7 +1417,7 @@ impl SuiNode {
             // Safe to call because we are in the middle of reconfiguration.
             let latest_system_state = self
                 .state
-                .database
+                .get_cache_reader()
                 .get_sui_system_state_object_unsafe()
                 .expect("Read Sui System State object cannot fail");
 
@@ -1601,7 +1606,7 @@ impl SuiNode {
         let epoch_start_configuration = EpochStartConfiguration::new(
             next_epoch_start_system_state,
             *last_checkpoint.digest(),
-            &state.database,
+            state.get_object_store().as_ref(),
         )
         .expect("EpochStartConfiguration construction cannot fail");
 
@@ -1620,7 +1625,7 @@ impl SuiNode {
             .expect("Reconfigure authority state cannot fail");
         info!(next_epoch, "Node State has been reconfigured");
         assert_eq!(next_epoch, new_epoch_store.epoch());
-        self.state.database.update_epoch_flags_metrics(
+        self.state._database.update_epoch_flags_metrics(
             cur_epoch_store.epoch_start_config().flags(),
             new_epoch_store.epoch_start_config().flags(),
         );

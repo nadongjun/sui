@@ -139,8 +139,8 @@ use crate::consensus_adapter::ConsensusAdapter;
 use crate::epoch::committee_store::CommitteeStore;
 use crate::execution_driver::execution_process;
 use crate::in_mem_execution_cache::{
-    ExecutionCache, ExecutionCacheRead, ExecutionCacheReconfigAPI, ExecutionCacheWrite,
-    StateSyncAPI,
+    CheckpointCache, ExecutionCache, ExecutionCacheRead, ExecutionCacheReconfigAPI,
+    ExecutionCacheWrite, StateSyncAPI,
 };
 use crate::metrics::LatencyObserver;
 use crate::module_cache_metrics::ResolverMetrics;
@@ -2501,6 +2501,10 @@ impl AuthorityState {
         self.execution_cache.clone()
     }
 
+    pub fn get_checkpoint_cache(&self) -> &dyn CheckpointCache {
+        self.execution_cache.as_ref()
+    }
+
     pub async fn prune_checkpoints_for_eligible_epochs(
         &self,
         config: NodeConfig,
@@ -2883,7 +2887,7 @@ impl AuthorityState {
 
         if expensive_safety_check_config.enable_secondary_index_checks() {
             if let Some(indexes) = self.indexes.clone() {
-                verify_indexes(self._database.clone(), indexes)
+                verify_indexes(&*self.execution_cache, indexes)
                     .expect("secondary indexes are inconsistent");
             }
         }
@@ -4560,7 +4564,7 @@ impl AuthorityState {
                 }
             })
             .collect::<BTreeSet<_>>();
-        DenyList::check_coin_deny_list(sender, coin_types, &self.database)?;
+        DenyList::check_coin_deny_list(sender, coin_types, &self.execution_cache)?;
         Ok(())
     }
 
@@ -4600,7 +4604,8 @@ impl AuthorityState {
             .epoch_store_for_testing()
             .protocol_config()
             .simplified_unwrap_then_delete();
-        self.database.iter_live_object_set(include_wrapped_object)
+        self.execution_cache
+            .iter_live_object_set(include_wrapped_object)
     }
 
     #[cfg(test)]
@@ -4732,9 +4737,9 @@ impl TransactionKeyValueStoreTrait for AuthorityState {
         &self,
         digest: TransactionDigest,
     ) -> SuiResult<Option<CheckpointSequenceNumber>> {
-        self.database
+        self.execution_cache
             .deprecated_get_transaction_checkpoint(&digest)
-            .map(|maybe| maybe.map(|(_epoch, checkpoint)| checkpoint))
+            .map(|res| res.map(|(_epoch, checkpoint)| checkpoint))
     }
 
     async fn get_object(
@@ -4752,7 +4757,7 @@ impl TransactionKeyValueStoreTrait for AuthorityState {
         digests: &[TransactionDigest],
     ) -> SuiResult<Vec<Option<CheckpointSequenceNumber>>> {
         let res = self
-            .database
+            ._database
             .deprecated_multi_get_transaction_checkpoint(digests)?;
 
         Ok(res
