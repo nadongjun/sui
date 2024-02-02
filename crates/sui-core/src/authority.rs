@@ -2505,6 +2505,10 @@ impl AuthorityState {
         self.execution_cache.as_ref()
     }
 
+    pub fn database_for_testing(&self) -> &Arc<AuthorityStore> {
+        self.execution_cache.store_for_testing()
+    }
+
     pub async fn prune_checkpoints_for_eligible_epochs(
         &self,
         config: NodeConfig,

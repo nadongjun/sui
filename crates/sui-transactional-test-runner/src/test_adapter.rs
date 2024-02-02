@@ -2136,7 +2136,7 @@ impl NodeStateGetter for SuiTestAdapter<'_> {
     fn multi_get_transaction_blocks(
         &self,
         tx_digests: &[TransactionDigest],
-    ) -> SuiResult<Vec<Option<VerifiedTransaction>>> {
+    ) -> SuiResult<Vec<Option<Arc<VerifiedTransaction>>>> {
         self.executor.multi_get_transaction_blocks(tx_digests)
     }
 
@@ -2158,7 +2158,7 @@ impl NodeStateGetter for SuiTestAdapter<'_> {
         &self,
         object_keys: &[ObjectKey],
     ) -> Result<Vec<Option<Object>>, SuiError> {
-        self.executor.multi_get_object_by_key(object_keys)
+        Ok(self.executor.multi_get_object_by_key(object_keys)?)
     }
 
     fn get_object_by_key(

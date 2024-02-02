@@ -568,6 +568,10 @@ impl PassthroughCache {
     pub fn as_notify_read_wrapper(self: Arc<Self>) -> NotifyReadWrapper<Self> {
         NotifyReadWrapper(self)
     }
+
+    pub fn store_for_testing(&self) -> &Arc<AuthorityStore> {
+        &self.store
+    }
 }
 
 impl ExecutionCacheRead for PassthroughCache {

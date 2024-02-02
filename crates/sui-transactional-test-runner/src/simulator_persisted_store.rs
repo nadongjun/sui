@@ -8,6 +8,7 @@ use move_bytecode_utils::module_cache::GetModule;
 use move_core_types::{language_storage::ModuleId, resolver::ModuleResolver};
 use simulacrum::Simulacrum;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use sui_config::genesis;
 use sui_protocol_config::ProtocolVersion;
 use sui_rest_api::node_state_getter::NodeStateGetter;
@@ -581,7 +582,7 @@ impl NodeStateGetter for PersistedStoreInnerReadOnlyWrapper {
     fn multi_get_transaction_blocks(
         &self,
         tx_digests: &[TransactionDigest],
-    ) -> SuiResult<Vec<Option<VerifiedTransaction>>> {
+    ) -> SuiResult<Vec<Option<Arc<VerifiedTransaction>>>> {
         self.sync();
 
         Ok(self
@@ -590,7 +591,7 @@ impl NodeStateGetter for PersistedStoreInnerReadOnlyWrapper {
             .multi_get(tx_digests)
             .expect("Fatal: DB read failed")
             .into_iter()
-            .map(|transaction| transaction.map(|x| x.into()))
+            .map(|transaction| transaction.map(|x| Arc::new(x.into())))
             .collect())
     }
 
