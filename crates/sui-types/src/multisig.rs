@@ -107,12 +107,12 @@ impl AuthenticatorTrait for MultiSig {
         self.multisig_pk
             .validate()
             .map_err(|_| SuiError::InvalidSignature {
-                error: "Invalid multisig".to_string(),
+                error: "Invalid multisig pubkey".to_string(),
             })?;
 
         if SuiAddress::from(&self.multisig_pk) != multisig_address {
             return Err(SuiError::InvalidSignature {
-                error: "Invalid address".to_string(),
+                error: "Invalid address derived from pks".to_string(),
             });
         }
 
@@ -143,7 +143,7 @@ impl AuthenticatorTrait for MultiSig {
                         let pk =
                             Ed25519PublicKey::from_bytes(subsig_pubkey.as_ref()).map_err(|_| {
                                 SuiError::InvalidSignature {
-                                    error: "Invalid public key".to_string(),
+                                    error: "Invalid ed25519 pk bytes".to_string(),
                                 }
                             })?;
                         pk.verify(
@@ -156,7 +156,7 @@ impl AuthenticatorTrait for MultiSig {
                     CompressedSignature::Secp256k1(s) => {
                         let pk = Secp256k1PublicKey::from_bytes(subsig_pubkey.as_ref()).map_err(
                             |_| SuiError::InvalidSignature {
-                                error: "Invalid public key".to_string(),
+                                error: "Invalid k1 pk bytes".to_string(),
                             },
                         )?;
                         pk.verify(
@@ -169,7 +169,7 @@ impl AuthenticatorTrait for MultiSig {
                     CompressedSignature::Secp256r1(s) => {
                         let pk = Secp256r1PublicKey::from_bytes(subsig_pubkey.as_ref()).map_err(
                             |_| SuiError::InvalidSignature {
-                                error: "Invalid public key".to_string(),
+                                error: "Invalid r1 pk bytes".to_string(),
                             },
                         )?;
                         pk.verify(
@@ -181,7 +181,9 @@ impl AuthenticatorTrait for MultiSig {
                     }
                     CompressedSignature::ZkLogin(z) => {
                         let authenticator = ZkLoginAuthenticator::from_bytes(&z.0)
-                            .map_err(|_| SuiError::InvalidAuthenticator)?;
+                            .map_err(|_| SuiError::InvalidSignature {
+                                error: "Invalid zklogin authenticator bytes".to_string(),
+                            })?;
                         authenticator
                             .verify_claims(value, SuiAddress::from(subsig_pubkey), verify_params)
                             .map_err(|e| FastCryptoError::GeneralError(e.to_string()))
@@ -192,7 +194,7 @@ impl AuthenticatorTrait for MultiSig {
             } else {
                 return res.map_err(|e| SuiError::InvalidSignature {
                     error: format!(
-                        "Invalid signature for pk={:?} address={:?} error={:?}",
+                        "Invalid sig for pk={:?} address={:?} error={:?}",
                         subsig_pubkey.encode_base64(),
                         SuiAddress::from(subsig_pubkey),
                         e.to_string()
@@ -204,7 +206,7 @@ impl AuthenticatorTrait for MultiSig {
             Ok(())
         } else {
             Err(SuiError::InvalidSignature {
-                error: format!("Insufficient weight {:?}", weight_sum),
+                error: format!("Insufficient weight={:?} threshold={:?}", weight_sum, self.multisig_pk.threshold),
             })
         }
     }
