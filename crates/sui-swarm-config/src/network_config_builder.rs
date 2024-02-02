@@ -14,6 +14,7 @@ use sui_types::base_types::{AuthorityName, SuiAddress};
 use sui_types::committee::{Committee, ProtocolVersion};
 use sui_types::crypto::{get_key_pair_from_rng, AccountKeyPair, KeypairTraits, PublicKey};
 use sui_types::object::Object;
+use sui_types::traffic_control::{PolicyConfig, PolicyType, TrafficControlPolicy};
 
 use crate::genesis_config::{AccountConfig, ValidatorGenesisConfigBuilder, DEFAULT_GAS_AMOUNT};
 use crate::genesis_config::{GenesisConfig, ValidatorGenesisConfig};
@@ -62,6 +63,7 @@ pub struct ConfigBuilder<R = OsRng> {
     num_unpruned_validators: Option<usize>,
     overload_threshold_config: Option<OverloadThresholdConfig>,
     data_ingestion_dir: Option<PathBuf>,
+    traffic_control_config: Option<PolicyConfig>,
 }
 
 impl ConfigBuilder {
@@ -78,6 +80,7 @@ impl ConfigBuilder {
             num_unpruned_validators: None,
             overload_threshold_config: None,
             data_ingestion_dir: None,
+            traffic_control_config: None,
         }
     }
 
@@ -200,6 +203,11 @@ impl<R> ConfigBuilder<R> {
         self
     }
 
+    pub fn with_traffic_control_config(mut self, config: Option<PolicyConfig>) -> Self {
+        self.traffic_control_config = config;
+        self
+    }
+
     pub fn rng<N: rand::RngCore + rand::CryptoRng>(self, rng: N) -> ConfigBuilder<N> {
         ConfigBuilder {
             rng: Some(rng),
@@ -213,6 +221,7 @@ impl<R> ConfigBuilder<R> {
             jwk_fetch_interval: self.jwk_fetch_interval,
             overload_threshold_config: self.overload_threshold_config,
             data_ingestion_dir: self.data_ingestion_dir,
+            traffic_control_config: self.traffic_control_config,
         }
     }
 
@@ -353,7 +362,8 @@ impl<R: rand::RngCore + rand::CryptoRng> ConfigBuilder<R> {
             .enumerate()
             .map(|(idx, validator)| {
                 let mut builder = ValidatorConfigBuilder::new()
-                    .with_config_directory(self.config_directory.clone());
+                    .with_config_directory(self.config_directory.clone())
+                    .with_traffic_control_config(self.traffic_control_config.clone());
 
                 if let Some(jwk_fetch_interval) = self.jwk_fetch_interval {
                     builder = builder.with_jwk_fetch_interval(jwk_fetch_interval);

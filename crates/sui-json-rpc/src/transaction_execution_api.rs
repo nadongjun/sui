@@ -174,6 +174,11 @@ impl TransactionExecutionApi {
         request_type: Option<ExecuteTransactionRequestType>,
         client_addr: Option<SocketAddr>,
     ) -> Result<SuiTransactionBlockResponse, Error> {
+        // TODO(william)
+        println!(
+            "TESTING -- monitored_execute_transaction_block, client address: {:?}",
+            client_addr
+        );
         let (opts, request_type, sender, input_objs, txn, transaction, raw_transaction) =
             self.prepare_execute_transaction_block(tx_bytes, signatures, opts, request_type)?;
         let digest = *txn.digest();

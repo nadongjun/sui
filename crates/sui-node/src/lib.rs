@@ -1283,7 +1283,9 @@ impl SuiNode {
             state.clone(),
             consensus_adapter,
             Arc::new(ValidatorServiceMetrics::new(prometheus_registry)),
-        );
+            config.traffic_control_config.unwrap_or_default(),
+        )
+        .await;
 
         let mut server_conf = mysten_network::config::Config::new();
         server_conf.global_concurrency_limit = config.grpc_concurrency_limit;

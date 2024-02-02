@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use mysten_metrics::histogram::Histogram as MystenHistogram;
 use mysten_metrics::spawn_monitored_task;
 use narwhal_worker::LazyNarwhalClient;
@@ -17,7 +17,6 @@ use sui_network::{
     api::{Validator, ValidatorServer},
     tonic,
 };
-use sui_types::effects::TransactionEvents;
 use sui_types::messages_consensus::ConsensusTransaction;
 use sui_types::messages_grpc::{
     HandleCertificateResponseV2, HandleTransactionResponse, ObjectInfoRequest, ObjectInfoResponse,
@@ -26,6 +25,7 @@ use sui_types::messages_grpc::{
 use sui_types::multiaddr::Multiaddr;
 use sui_types::sui_system_state::SuiSystemState;
 use sui_types::{effects::TransactionEffectsAPI, message_envelope::Message};
+use sui_types::{effects::TransactionEvents, traffic_control::PolicyConfig};
 use sui_types::{error::*, transaction::*};
 use sui_types::{
     fp_ensure,
@@ -34,7 +34,6 @@ use sui_types::{
     },
 };
 use tap::TapFallible;
-use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{error, error_span, info, Instrument};
 
@@ -42,7 +41,9 @@ use crate::consensus_adapter::ConnectionMonitorStatusForTests;
 use crate::{
     authority::AuthorityState,
     consensus_adapter::{ConsensusAdapter, ConsensusAdapterMetrics},
+    traffic_controller::TrafficController,
 };
+use sui_types::traffic_control::TrafficTally;
 
 #[cfg(test)]
 #[path = "unit_tests/server_tests.rs"]
@@ -122,14 +123,15 @@ impl AuthorityServer {
         self,
         address: Multiaddr,
     ) -> Result<AuthorityServerHandle, io::Error> {
-        let (tx, mut _rx) = mpsc::channel(100);
         let mut server = mysten_network::config::Config::new()
             .server_builder()
             .add_service(ValidatorServer::new(ValidatorService {
                 state: self.state,
                 consensus_adapter: self.consensus_adapter,
                 metrics: self.metrics.clone(),
-                traffic_channel: tx,
+                traffic_controller: Arc::new(
+                    TrafficController::spawn(PolicyConfig::default()).await,
+                ),
             }))
             .bind(&address)
             .await
@@ -245,32 +247,21 @@ pub struct ValidatorService {
     state: Arc<AuthorityState>,
     consensus_adapter: Arc<ConsensusAdapter>,
     metrics: Arc<ValidatorServiceMetrics>,
-    traffic_channel: mpsc::Sender<TrafficTally>,
-}
-
-#[derive(Clone, Debug)]
-#[allow(dead_code)] // TODO(william): remove after use
-pub struct TrafficTally {
-    remote_addr: Option<SocketAddr>,
-    end_user_addr: Option<SocketAddr>,
-    result: SuiResult,
-    timestamp: DateTime<Utc>,
+    traffic_controller: Arc<TrafficController>,
 }
 
 impl ValidatorService {
-    pub fn new(
+    pub async fn new(
         state: Arc<AuthorityState>,
         consensus_adapter: Arc<ConsensusAdapter>,
         metrics: Arc<ValidatorServiceMetrics>,
+        traffic_control_config: PolicyConfig,
     ) -> Self {
-        // TODO(william) implement receiver component
-        let (tx, mut _rx) = mpsc::channel(100);
-
         Self {
             state,
             consensus_adapter,
             metrics,
-            traffic_channel: tx,
+            traffic_controller: Arc::new(TrafficController::spawn(traffic_control_config).await),
         }
     }
 
@@ -306,7 +297,7 @@ impl ValidatorService {
             state,
             consensus_adapter,
             metrics,
-            traffic_channel: _,
+            traffic_controller: _,
         } = self.clone();
         let transaction = request.into_inner();
 
@@ -376,7 +367,7 @@ impl ValidatorService {
             state,
             consensus_adapter,
             metrics,
-            traffic_channel: _,
+            traffic_controller: _,
         } = self.clone();
 
         let epoch_store = state.load_epoch_store_one_call_per_task();
@@ -592,7 +583,24 @@ impl ValidatorService {
         Ok(tonic::Response::new(response))
     }
 
-    async fn handle_traffic_tally<T>(
+    async fn handle_traffic_req(
+        &self,
+        remote_addr: Option<SocketAddr>,
+        end_user_addr: Option<SocketAddr>,
+    ) -> Result<(), tonic::Status> {
+        if !self
+            .traffic_controller
+            .check(remote_addr, end_user_addr)
+            .await
+        {
+            // Entity in blocklist
+            Err(tonic::Status::resource_exhausted("Too many requests"))
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn handle_traffic_resp<T>(
         &self,
         remote_addr: Option<SocketAddr>,
         end_user_addr: Option<SocketAddr>,
@@ -605,8 +613,8 @@ impl ValidatorService {
         };
 
         if let Err(err) = self
-            .traffic_channel
-            .send(TrafficTally {
+            .traffic_controller
+            .tally(TrafficTally {
                 remote_addr,
                 end_user_addr,
                 result,
@@ -635,10 +643,19 @@ macro_rules! handle_with_decoration {
         // TODO: add metric here
         if remote_addr.is_none() {
             if cfg!(all(test, not(msim))) {
+                // TODO(william)
+                println!("TESTING -- msim - Failed to get remote address from request");
+
                 panic!("Failed to get remote address from request");
             } else {
+                // TODO(william)
+                println!("TESTING -- tokio - Failed to get remote address from request");
+
                 error!("Failed to get remote address from request");
             }
+        } else {
+            // TODO(william)
+            println!("TESTING -- remote address: {:?}", remote_addr);
         }
 
         let end_user_addr: Option<SocketAddr> =
@@ -657,9 +674,13 @@ macro_rules! handle_with_decoration {
                     })
             });
 
+        // check if either IP is blocked, in which case return early
+        $self.handle_traffic_req(remote_addr, end_user_addr).await?;
+        // handle request
         let response = $self.$func_name($request).await;
+        // handle response tallying
         $self
-            .handle_traffic_tally(remote_addr, end_user_addr, &response)
+            .handle_traffic_resp(remote_addr, end_user_addr, &response)
             .await;
         response
     }};
