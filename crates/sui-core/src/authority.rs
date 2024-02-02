@@ -145,7 +145,7 @@ use crate::in_mem_execution_cache::{
 use crate::metrics::LatencyObserver;
 use crate::module_cache_metrics::ResolverMetrics;
 use crate::stake_aggregator::StakeAggregator;
-use crate::state_accumulator::{StateAccumulator, WrappedObject};
+use crate::state_accumulator::{AccumulatorStore, StateAccumulator, WrappedObject};
 use crate::subscription_handler::SubscriptionHandler;
 use crate::transaction_input_loader::TransactionInputLoader;
 use crate::transaction_manager::TransactionManager;
@@ -2793,8 +2793,8 @@ impl AuthorityState {
                 }));
             }
             let (last_checkpoint_of_epoch, cur_accumulator) = self
-                ._database
-                .get_root_state_accumulator(cur_epoch_store.epoch());
+                .execution_cache
+                .get_root_state_accumulator_for_epoch(cur_epoch_store.epoch());
             let (accumulator, total_objects_scanned, total_wrapped_objects) =
                 pending_tasks.into_iter().fold(
                     (cur_accumulator, 0u64, 0usize),

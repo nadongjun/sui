@@ -11,6 +11,7 @@ use crate::authority::authority_store_types::{
     get_store_object_pair, ObjectContentDigest, StoreObject, StoreObjectPair, StoreObjectWrapper,
 };
 use crate::authority::epoch_start_configuration::{EpochFlag, EpochStartConfiguration};
+use crate::state_accumulator::AccumulatorStore;
 use crate::transaction_outputs::TransactionOutputs;
 use either::Either;
 use fastcrypto::hash::{HashFunction, MultisetHash, Sha3_256};
@@ -268,13 +269,6 @@ impl AuthorityStore {
         Ok(acc.1.digest().into())
     }
 
-    pub fn get_root_state_accumulator_for_epoch(
-        &self,
-        epoch: EpochId,
-    ) -> SuiResult<Option<(CheckpointSequenceNumber, Accumulator)>> {
-        self.perpetual_tables.root_state_hash_by_epoch.get(&epoch)
-    }
-
     pub fn get_recovery_epoch_at_restart(&self) -> SuiResult<EpochId> {
         self.perpetual_tables.get_recovery_epoch_at_restart()
     }
@@ -505,7 +499,7 @@ impl AuthorityStore {
             .collect())
     }
 
-    pub fn get_object_ref_prior_to_key(
+    fn get_object_ref_prior_to_key(
         &self,
         object_id: &ObjectID,
         version: VersionNumber,
@@ -1677,6 +1671,53 @@ impl AuthorityStore {
             .collect::<Result<Vec<_>, _>>()
             .unwrap()
             .len()
+    }
+}
+
+impl AccumulatorStore for AuthorityStore {
+    fn get_object_ref_prior_to_key_deprecated(
+        &self,
+        object_id: &ObjectID,
+        version: VersionNumber,
+    ) -> SuiResult<Option<ObjectRef>> {
+        self.get_object_ref_prior_to_key(object_id, version)
+    }
+
+    fn get_root_state_accumulator_for_epoch(
+        &self,
+        epoch: EpochId,
+    ) -> SuiResult<Option<(CheckpointSequenceNumber, Accumulator)>> {
+        self.perpetual_tables
+            .root_state_hash_by_epoch
+            .get(&epoch)
+            .map_err(Into::into)
+    }
+
+    fn get_root_state_accumulator_for_highest_epoch(
+        &self,
+    ) -> SuiResult<Option<(EpochId, (CheckpointSequenceNumber, Accumulator))>> {
+        Ok(self
+            .perpetual_tables
+            .root_state_hash_by_epoch
+            .safe_iter()
+            .skip_to_last()
+            .next()
+            .transpose()?)
+    }
+
+    fn insert_state_accumulator_for_epoch(
+        &self,
+        epoch: EpochId,
+        last_checkpoint_of_epoch: &CheckpointSequenceNumber,
+        acc: &Accumulator,
+    ) -> SuiResult {
+        self.perpetual_tables
+            .root_state_hash_by_epoch
+            .insert(&epoch, &(last_checkpoint_of_epoch, acc))?;
+        self.root_state_notify_read
+            .notify(&epoch, &(last_checkpoint_of_epoch, acc.clone()));
+
+        Ok(())
     }
 }
 

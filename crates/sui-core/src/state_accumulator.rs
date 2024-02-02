@@ -9,7 +9,6 @@ use sui_types::base_types::{ObjectID, ObjectRef, SequenceNumber, VersionNumber};
 use sui_types::committee::EpochId;
 use sui_types::digests::{ObjectDigest, TransactionDigest};
 use sui_types::in_memory_storage::InMemoryStorage;
-use sui_types::object::Object;
 use sui_types::storage::{ObjectKey, ObjectStore};
 use tracing::debug;
 use typed_store::Map;
@@ -26,15 +25,13 @@ use sui_types::messages_checkpoint::{CheckpointSequenceNumber, ECMHLiveObjectSet
 
 use crate::authority::authority_per_epoch_store::AuthorityPerEpochStore;
 use crate::authority::authority_store_tables::LiveObject;
-use crate::authority::AuthorityStore;
+use crate::in_mem_execution_cache::ExecutionCacheRead;
 
 pub struct StateAccumulator {
-    store: Arc<dyn AccumulatorReadStore>,
+    store: Arc<dyn AccumulatorStore>,
 }
 
-pub trait AccumulatorReadStore {
-    fn multi_get_object_by_key(&self, object_keys: &[ObjectKey]) -> SuiResult<Vec<Option<Object>>>;
-
+pub trait AccumulatorStore: ObjectStore + Send + Sync {
     /// This function is only called in older protocol versions, and should no longer be used.
     /// It creates an explicit dependency to tombstones which is not desired.
     fn get_object_ref_prior_to_key_deprecated(
@@ -50,45 +47,17 @@ pub trait AccumulatorReadStore {
 
     fn get_root_state_accumulator_for_highest_epoch(
         &self,
-    ) -> SuiResult<Option<(CheckpointSequenceNumber, Accumulator)>>;
-}
+    ) -> SuiResult<Option<(EpochId, (CheckpointSequenceNumber, Accumulator))>>;
 
-impl AccumulatorReadStore for AuthorityStore {
-    fn multi_get_object_by_key(&self, object_keys: &[ObjectKey]) -> SuiResult<Vec<Option<Object>>> {
-        self.multi_get_object_by_key(object_keys)
-    }
-
-    fn get_object_ref_prior_to_key_deprecated(
-        &self,
-        object_id: &ObjectID,
-        version: VersionNumber,
-    ) -> SuiResult<Option<ObjectRef>> {
-        self.get_object_ref_prior_to_key(object_id, version)
-    }
-
-    fn get_root_state_accumulator_for_epoch(
+    fn insert_state_accumulator_for_epoch(
         &self,
         epoch: EpochId,
-    ) -> SuiResult<Option<(CheckpointSequenceNumber, Accumulator)>> {
-        self.store.get_root_state_accumulator_for_epoch(epoch)
-    }
-
-    fn get_root_state_accumulator_for_highest_epoch(
-        &self,
-    ) -> SuiResult<Option<(CheckpointSequenceNumber, Accumulator)>> {
-        self.store.get_root_state_accumulator_for_highest_epoch()
-    }
+        checkpoint_seq_num: &CheckpointSequenceNumber,
+        acc: &Accumulator,
+    ) -> SuiResult;
 }
 
-impl AccumulatorReadStore for InMemoryStorage {
-    fn multi_get_object_by_key(&self, object_keys: &[ObjectKey]) -> SuiResult<Vec<Option<Object>>> {
-        let mut objects = Vec::new();
-        for key in object_keys {
-            objects.push(self.get_object_by_key(&key.0, key.1)?);
-        }
-        Ok(objects)
-    }
-
+impl AccumulatorStore for InMemoryStorage {
     fn get_object_ref_prior_to_key_deprecated(
         &self,
         _object_id: &ObjectID,
@@ -106,7 +75,16 @@ impl AccumulatorReadStore for InMemoryStorage {
 
     fn get_root_state_accumulator_for_highest_epoch(
         &self,
-    ) -> SuiResult<Option<(CheckpointSequenceNumber, Accumulator)>> {
+    ) -> SuiResult<Option<(EpochId, (CheckpointSequenceNumber, Accumulator))>> {
+        unreachable!("not used for testing")
+    }
+
+    fn insert_state_accumulator_for_epoch(
+        &self,
+        epoch: EpochId,
+        checkpoint_seq_num: &CheckpointSequenceNumber,
+        acc: &Accumulator,
+    ) -> SuiResult {
         unreachable!("not used for testing")
     }
 }
@@ -138,7 +116,7 @@ pub fn accumulate_effects<T, S>(
 ) -> Accumulator
 where
     S: std::ops::Deref<Target = T>,
-    T: AccumulatorReadStore,
+    T: AccumulatorStore,
 {
     if protocol_config.enable_effects_v2() {
         accumulate_effects_v3(effects)
@@ -156,7 +134,7 @@ fn accumulate_effects_v1<T, S>(
 ) -> Accumulator
 where
     S: std::ops::Deref<Target = T>,
-    T: AccumulatorReadStore,
+    T: AccumulatorStore,
 {
     let mut acc = Accumulator::default();
 
@@ -286,7 +264,7 @@ where
 fn accumulate_effects_v2<T, S>(store: S, effects: Vec<TransactionEffects>) -> Accumulator
 where
     S: std::ops::Deref<Target = T>,
-    T: AccumulatorReadStore,
+    T: AccumulatorStore,
 {
     let mut acc = Accumulator::default();
 
@@ -359,7 +337,7 @@ fn accumulate_effects_v3(effects: Vec<TransactionEffects>) -> Accumulator {
 }
 
 impl StateAccumulator {
-    pub fn new(store: Arc<dyn AccumulatorReadStore>) -> Self {
+    pub fn new(store: Arc<dyn AccumulatorStore>) -> Self {
         Self { store }
     }
 
@@ -406,39 +384,23 @@ impl StateAccumulator {
         last_checkpoint_of_epoch: CheckpointSequenceNumber,
         epoch_store: Arc<AuthorityPerEpochStore>,
     ) -> SuiResult<Accumulator> {
-        if let Some((_checkpoint, acc)) = self.store.get_root_state_accumulator_for_epoch(epoch)? {
+        if let Some((_checkpoint, acc)) = self.store.get_root_state_accumulator_for_epoch(*epoch)? {
             return Ok(acc);
         }
 
         // Get the next checkpoint to accumulate (first checkpoint of the epoch)
         // by adding 1 to the highest checkpoint of the previous epoch
-        let (highest_epoch, (next_to_accumulate, mut root_state_accumulator)) = self
+        let (_highest_epoch, (next_to_accumulate, mut root_state_accumulator)) = self
             .store
             .get_root_state_accumulator_for_highest_epoch()?
-            .map(|(epoch, (highest, hash))| {
+            .map(|(epoch, (checkpoint, acc))| {
                 (
                     epoch,
                     (
-                        highest.checked_add(1).expect("Overflowed u64 for epoch ID"),
-                        hash,
-                    ),
-                )
-            })
-            .unwrap_or((0, (0, Accumulator::default())));
-
-        let (_, (next_to_accumulate, mut root_state_hash)) = self
-            .authority_store
-            .perpetual_tables
-            .root_state_hash_by_epoch
-            .unbounded_iter()
-            .skip_to_last()
-            .next()
-            .map(|(epoch, (highest, hash))| {
-                (
-                    epoch,
-                    (
-                        highest.checked_add(1).expect("Overflowed u64 for epoch ID"),
-                        hash,
+                        checkpoint
+                            .checked_add(1)
+                            .expect("Overflowed u64 for epoch ID"),
+                        acc,
                     ),
                 )
             })
@@ -475,19 +437,16 @@ impl StateAccumulator {
         assert!(accumulators.len() == (last_checkpoint_of_epoch - next_to_accumulate + 1) as usize);
 
         for acc in accumulators {
-            root_state_hash.union(&acc);
+            root_state_accumulator.union(&acc);
         }
 
-        self.authority_store
-            .perpetual_tables
-            .root_state_hash_by_epoch
-            .insert(epoch, &(last_checkpoint_of_epoch, root_state_hash.clone()))?;
+        self.store.insert_state_accumulator_for_epoch(
+            *epoch,
+            &last_checkpoint_of_epoch,
+            &root_state_accumulator,
+        )?;
 
-        self.authority_store
-            .root_state_notify_read
-            .notify(epoch, &(last_checkpoint_of_epoch, root_state_hash.clone()));
-
-        Ok(root_state_hash)
+        Ok(root_state_accumulator)
     }
 
     /// Returns the result of accumulating the live object set, without side effects

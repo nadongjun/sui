@@ -6,7 +6,7 @@ use crate::authority::AuthorityStore;
 use crate::authority::{
     authority_notify_read::EffectsNotifyRead, epoch_start_configuration::EpochStartConfiguration,
 };
-use crate::state_accumulator::AccumulatorReadStore;
+use crate::state_accumulator::AccumulatorStore;
 use crate::transaction_outputs::TransactionOutputs;
 use async_trait::async_trait;
 
@@ -757,22 +757,20 @@ impl StateSyncAPI for PassthroughCache {
         transaction: &VerifiedTransaction,
         transaction_effects: &TransactionEffects,
     ) -> SuiResult {
-        self.store
-            .insert_transaction_and_effects(transaction, transaction_effects)
+        Ok(self
+            .store
+            .insert_transaction_and_effects(transaction, transaction_effects)?)
     }
 }
 
-impl AccumulatorReadStore for PassthroughCache {
-    fn multi_get_object_by_key(&self, object_keys: &[ObjectKey]) -> SuiResult<Vec<Option<Object>>> {
-        self.multi_get_object_by_key(object_keys)
-    }
-
+impl AccumulatorStore for PassthroughCache {
     fn get_object_ref_prior_to_key_deprecated(
         &self,
         object_id: &ObjectID,
         version: sui_types::base_types::VersionNumber,
     ) -> SuiResult<Option<ObjectRef>> {
-        self.store.get_object_ref_prior_to_key(object_id, version)
+        self.store
+            .get_object_ref_prior_to_key_deprecated(object_id, version)
     }
 
     fn get_root_state_accumulator_for_epoch(
@@ -786,6 +784,16 @@ impl AccumulatorReadStore for PassthroughCache {
         &self,
     ) -> SuiResult<Option<(EpochId, (CheckpointSequenceNumber, Accumulator))>> {
         self.store.get_root_state_accumulator_for_highest_epoch()
+    }
+
+    fn insert_state_accumulator_for_epoch(
+        &self,
+        epoch: EpochId,
+        checkpoint_seq_num: &CheckpointSequenceNumber,
+        acc: &Accumulator,
+    ) -> SuiResult {
+        self.store
+            .insert_state_accumulator_for_epoch(epoch, checkpoint_seq_num, acc)
     }
 }
 
