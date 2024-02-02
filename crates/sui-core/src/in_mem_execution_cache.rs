@@ -565,7 +565,7 @@ impl ExecutionCacheRead for PassthroughCache {
         &self,
         object_keys: &[ObjectKey],
     ) -> Result<Vec<Option<Object>>, SuiError> {
-        self.store.multi_get_object_by_key(object_keys)
+        Ok(self.store.multi_get_object_by_key(object_keys)?)
     }
 
     fn object_exists_by_key(
@@ -794,6 +794,13 @@ impl AccumulatorStore for PassthroughCache {
     ) -> SuiResult {
         self.store
             .insert_state_accumulator_for_epoch(epoch, checkpoint_seq_num, acc)
+    }
+
+    fn iter_live_object_set(
+        &self,
+        include_wrapped_tombstone: bool,
+    ) -> Box<dyn Iterator<Item = crate::authority::authority_store_tables::LiveObject> + '_> {
+        self.store.iter_live_object_set(include_wrapped_tombstone)
     }
 }
 

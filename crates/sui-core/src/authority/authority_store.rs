@@ -1425,14 +1425,6 @@ impl AuthorityStore {
         get_sui_system_state(self.perpetual_tables.as_ref())
     }
 
-    pub fn iter_live_object_set(
-        &self,
-        include_wrapped_object: bool,
-    ) -> impl Iterator<Item = LiveObject> + '_ {
-        self.perpetual_tables
-            .iter_live_object_set(include_wrapped_object)
-    }
-
     pub fn expensive_check_sui_conservation(
         self: &Arc<Self>,
         old_epoch_store: &AuthorityPerEpochStore,
@@ -1718,6 +1710,16 @@ impl AccumulatorStore for AuthorityStore {
             .notify(&epoch, &(*last_checkpoint_of_epoch, acc.clone()));
 
         Ok(())
+    }
+
+    fn iter_live_object_set(
+        &self,
+        include_wrapped_object: bool,
+    ) -> Box<dyn Iterator<Item = LiveObject> + '_> {
+        Box::new(
+            self.perpetual_tables
+                .iter_live_object_set(include_wrapped_object),
+        )
     }
 }
 

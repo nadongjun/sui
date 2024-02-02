@@ -11,7 +11,6 @@ use sui_types::digests::{ObjectDigest, TransactionDigest};
 use sui_types::in_memory_storage::InMemoryStorage;
 use sui_types::storage::{ObjectKey, ObjectStore};
 use tracing::debug;
-use typed_store::Map;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -25,7 +24,6 @@ use sui_types::messages_checkpoint::{CheckpointSequenceNumber, ECMHLiveObjectSet
 
 use crate::authority::authority_per_epoch_store::AuthorityPerEpochStore;
 use crate::authority::authority_store_tables::LiveObject;
-use crate::in_mem_execution_cache::ExecutionCacheRead;
 
 pub struct StateAccumulator {
     store: Arc<dyn AccumulatorStore>,
@@ -55,6 +53,11 @@ pub trait AccumulatorStore: ObjectStore + Send + Sync {
         checkpoint_seq_num: &CheckpointSequenceNumber,
         acc: &Accumulator,
     ) -> SuiResult;
+
+    fn iter_live_object_set(
+        &self,
+        include_wrapped_tombstone: bool,
+    ) -> Box<dyn Iterator<Item = LiveObject> + '_>;
 }
 
 impl AccumulatorStore for InMemoryStorage {
@@ -87,6 +90,13 @@ impl AccumulatorStore for InMemoryStorage {
     ) -> SuiResult {
         unreachable!("not used for testing")
     }
+
+    fn iter_live_object_set(
+        &self,
+        include_wrapped_tombstone: bool,
+    ) -> Box<dyn Iterator<Item = LiveObject> + '_> {
+        unreachable!("not used for testing")
+    }
 }
 
 /// Serializable representation of the ObjectRef of an
@@ -116,7 +126,7 @@ pub fn accumulate_effects<T, S>(
 ) -> Accumulator
 where
     S: std::ops::Deref<Target = T>,
-    T: AccumulatorStore,
+    T: AccumulatorStore + ?Sized,
 {
     if protocol_config.enable_effects_v2() {
         accumulate_effects_v3(effects)
@@ -134,7 +144,7 @@ fn accumulate_effects_v1<T, S>(
 ) -> Accumulator
 where
     S: std::ops::Deref<Target = T>,
-    T: AccumulatorStore,
+    T: AccumulatorStore + ?Sized,
 {
     let mut acc = Accumulator::default();
 
@@ -264,7 +274,7 @@ where
 fn accumulate_effects_v2<T, S>(store: S, effects: Vec<TransactionEffects>) -> Accumulator
 where
     S: std::ops::Deref<Target = T>,
-    T: AccumulatorStore,
+    T: AccumulatorStore + ?Sized,
 {
     let mut acc = Accumulator::default();
 
@@ -452,10 +462,7 @@ impl StateAccumulator {
     /// Returns the result of accumulating the live object set, without side effects
     pub fn accumulate_live_object_set(&self, include_wrapped_tombstone: bool) -> Accumulator {
         let mut acc = Accumulator::default();
-        for live_object in self
-            .authority_store
-            .iter_live_object_set(include_wrapped_tombstone)
-        {
+        for live_object in self.store.iter_live_object_set(include_wrapped_tombstone) {
             match live_object {
                 LiveObject::Normal(object) => {
                     acc.insert(object.compute_object_reference().2);
