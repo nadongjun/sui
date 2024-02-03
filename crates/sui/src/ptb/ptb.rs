@@ -360,9 +360,13 @@ impl PTB {
         // We need to resolve object IDs, so we need a fullnode to access
         let config_path = sui_config::sui_config_dir()?.join(sui_config::SUI_CLIENT_CONFIG);
         let context = WalletContext::new(&config_path, None, None).await?;
-        let starting_addresses = context.config.keystore.addresses_with_alias().into_iter().map(|(sa, alias)| {
-            (alias.alias.clone(), AccountAddress::from(*sa))
-        }).collect();
+        let starting_addresses = context
+            .config
+            .keystore
+            .addresses_with_alias()
+            .into_iter()
+            .map(|(sa, alias)| (alias.alias.clone(), AccountAddress::from(*sa)))
+            .collect();
 
         let client = context.get_client().await?;
         let mut builder = PTBBuilder::new(starting_addresses, client.read_api());
