@@ -2,7 +2,6 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::authority::authority_store_types::{StoreObject, StoreObjectWrapper};
 use crate::transaction_outputs::TransactionOutputs;
 use crate::verify_indexes::verify_indexes;
 use anyhow::anyhow;
@@ -12,7 +11,6 @@ use chrono::prelude::*;
 use fastcrypto::encoding::Base58;
 use fastcrypto::encoding::Encoding;
 use fastcrypto::hash::MultisetHash;
-use futures::stream::FuturesUnordered;
 use itertools::Itertools;
 use move_binary_format::CompiledModule;
 use move_core_types::annotated_value::MoveStructLayout;
@@ -31,13 +29,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use std::{
     collections::{HashMap, HashSet},
     fs,
     pin::Pin,
     sync::Arc,
-    thread, vec,
+    vec,
 };
 use sui_config::node::{OverloadThresholdConfig, StateDebugDumpConfig};
 use sui_config::NodeConfig;
@@ -99,7 +97,7 @@ use sui_types::messages_checkpoint::{
     CertifiedCheckpointSummary, CheckpointCommitment, CheckpointContents, CheckpointContentsDigest,
     CheckpointDigest, CheckpointRequest, CheckpointRequestV2, CheckpointResponse,
     CheckpointResponseV2, CheckpointSequenceNumber, CheckpointSummary, CheckpointSummaryResponse,
-    CheckpointTimestamp, VerifiedCheckpoint,
+    CheckpointTimestamp, ECMHLiveObjectSetDigest, VerifiedCheckpoint,
 };
 use sui_types::messages_consensus::AuthorityCapabilities;
 use sui_types::messages_grpc::{
@@ -125,7 +123,7 @@ use sui_types::{
     SUI_SYSTEM_ADDRESS,
 };
 use sui_types::{is_system_package, TypeTag};
-use typed_store::{Map, TypedStoreError};
+use typed_store::TypedStoreError;
 
 use crate::authority::authority_per_epoch_store::{AuthorityPerEpochStore, CertTxGuard};
 use crate::authority::authority_per_epoch_store_pruner::AuthorityPerEpochStorePruner;
@@ -1069,7 +1067,7 @@ impl AuthorityState {
     }
 
     async fn check_owned_locks(&self, owned_object_refs: &[ObjectRef]) -> SuiResult {
-        self._database
+        self.execution_cache
             .check_owned_object_locks_exist(owned_object_refs)
     }
 
@@ -2440,7 +2438,7 @@ impl AuthorityState {
             epoch_store: ArcSwap::new(epoch_store.clone()),
             input_loader,
             execution_cache,
-            _database: store,
+            __database: store,
             indexes,
             subscription_handler: Arc::new(SubscriptionHandler::new(prometheus_registry)),
             checkpoint_store,
@@ -2505,11 +2503,15 @@ impl AuthorityState {
         self.execution_cache.as_ref()
     }
 
+    pub fn get_state_sync_store(&self) -> &dyn StateSyncAPI {
+        self.execution_cache.as_ref()
+    }
+
     pub fn database_for_testing(&self) -> &Arc<AuthorityStore> {
         self.execution_cache.store_for_testing()
     }
 
-    pub async fn prune_checkpoints_for_eligible_epochs(
+    pub async fn prune_checkpoints_for_eligible_epochs_for_testing(
         &self,
         config: NodeConfig,
         metrics: Arc<AuthorityStorePruningMetrics>,
@@ -2517,9 +2519,9 @@ impl AuthorityState {
         let archive_readers =
             ArchiveReaderBalancer::new(config.archive_reader_config(), &Registry::default())?;
         AuthorityStorePruner::prune_checkpoints_for_eligible_epochs(
-            &self._database.perpetual_tables,
+            &self.execution_cache.store_for_testing().perpetual_tables,
             &self.checkpoint_store,
-            &self._database.objects_lock_table,
+            &self.execution_cache.store_for_testing().objects_lock_table,
             config.authority_store_pruning_config,
             metrics,
             config.indirect_objects_threshold,
@@ -2548,16 +2550,11 @@ impl AuthorityState {
     // guard as an argument to ensure that this is the case.
     fn clear_object_per_epoch_marker_table(
         &self,
-        _execution_guard: &ExecutionLockWriteGuard<'_>,
+        execution_guard: &ExecutionLockWriteGuard<'_>,
     ) -> SuiResult<()> {
-        // We can safely delete all entries in the per epoch marker table since this is only called
-        // at epoch boundaries (during reconfiguration). Therefore any entries that currently
-        // exist can be removed. Because of this we can use the `schedule_delete_all` method.
-        Ok(self
-            ._database
-            .perpetual_tables
-            .object_per_epoch_marker_table
-            .schedule_delete_all()?)
+        self.execution_cache
+            .clear_object_per_epoch_marker_table(execution_guard);
+        Ok(())
     }
 
     fn create_owner_index_if_empty(
@@ -2711,140 +2708,8 @@ impl AuthorityState {
         cur_epoch_store: &AuthorityPerEpochStore,
         new_protocol_version: ProtocolVersion,
     ) {
-        let old_simplified_unwrap_then_delete = cur_epoch_store
-            .protocol_config()
-            .simplified_unwrap_then_delete();
-        let new_simplified_unwrap_then_delete = ProtocolConfig::get_for_version(
-            new_protocol_version,
-            cur_epoch_store.get_chain_identifier().chain(),
-        )
-        .simplified_unwrap_then_delete();
-        // If in the new epoch the simplified_unwrap_then_delete is enabled for the first time,
-        // we re-accumulate state root.
-        let should_reaccumulate =
-            !old_simplified_unwrap_then_delete && new_simplified_unwrap_then_delete;
-        if !should_reaccumulate {
-            return;
-        }
-        info!("[Re-accumulate] simplified_unwrap_then_delete is enabled in the new protocol version, re-accumulating state hash");
-        let cur_time = Instant::now();
-        thread::scope(|s| {
-            let pending_tasks = FuturesUnordered::new();
-            // Shard the object IDs into different ranges so that we can process them in parallel.
-            // We divide the range into 2^BITS number of ranges. To do so we use the highest BITS bits
-            // to mark the starting/ending point of the range. For example, when BITS = 5, we
-            // divide the range into 32 ranges, and the first few ranges are:
-            // 00000000_.... to 00000111_....
-            // 00001000_.... to 00001111_....
-            // 00010000_.... to 00010111_....
-            // and etc.
-            const BITS: u8 = 5;
-            for index in 0u8..(1 << BITS) {
-                pending_tasks.push(s.spawn(move || {
-                    let mut id_bytes = [0; ObjectID::LENGTH];
-                    id_bytes[0] = index << (8 - BITS);
-                    let start_id = ObjectID::new(id_bytes);
-
-                    id_bytes[0] |= (1 << (8 - BITS)) - 1;
-                    for element in id_bytes.iter_mut().skip(1) {
-                        *element = u8::MAX;
-                    }
-                    let end_id = ObjectID::new(id_bytes);
-
-                    info!(
-                        "[Re-accumulate] Scanning object ID range {:?}..{:?}",
-                        start_id, end_id
-                    );
-                    let mut prev = (
-                        ObjectKey::min_for_id(&ObjectID::ZERO),
-                        StoreObjectWrapper::V1(StoreObject::Deleted),
-                    );
-                    let mut object_scanned: u64 = 0;
-                    let mut wrapped_objects_to_remove = vec![];
-                    for db_result in self._database.perpetual_tables.objects.safe_range_iter(
-                        ObjectKey::min_for_id(&start_id)..=ObjectKey::max_for_id(&end_id),
-                    ) {
-                        match db_result {
-                            Ok((object_key, object)) => {
-                                object_scanned += 1;
-                                if object_scanned % 100000 == 0 {
-                                    info!(
-                                        "[Re-accumulate] Task {}: object scanned: {}",
-                                        index, object_scanned,
-                                    );
-                                }
-                                if matches!(prev.1.inner(), StoreObject::Wrapped)
-                                    && object_key.0 != prev.0 .0
-                                {
-                                    wrapped_objects_to_remove
-                                        .push(WrappedObject::new(prev.0 .0, prev.0 .1));
-                                }
-
-                                prev = (object_key, object);
-                            }
-                            Err(err) => {
-                                warn!("Object iterator encounter RocksDB error {:?}", err);
-                                return Err(err);
-                            }
-                        }
-                    }
-                    if matches!(prev.1.inner(), StoreObject::Wrapped) {
-                        wrapped_objects_to_remove.push(WrappedObject::new(prev.0 .0, prev.0 .1));
-                    }
-                    info!(
-                        "[Re-accumulate] Task {}: object scanned: {}, wrapped objects: {}",
-                        index,
-                        object_scanned,
-                        wrapped_objects_to_remove.len(),
-                    );
-                    Ok((wrapped_objects_to_remove, object_scanned))
-                }));
-            }
-            let (last_checkpoint_of_epoch, cur_accumulator) = self
-                .execution_cache
-                .get_root_state_accumulator_for_epoch(cur_epoch_store.epoch())
-                .expect("read cannot fail")
-                .expect("accumulator must exist");
-            let (accumulator, total_objects_scanned, total_wrapped_objects) =
-                pending_tasks.into_iter().fold(
-                    (cur_accumulator, 0u64, 0usize),
-                    |(mut accumulator, total_objects_scanned, total_wrapped_objects), task| {
-                        let (wrapped_objects_to_remove, object_scanned) =
-                            task.join().unwrap().unwrap();
-                        accumulator.remove_all(
-                            wrapped_objects_to_remove
-                                .iter()
-                                .map(|wrapped| bcs::to_bytes(wrapped).unwrap().to_vec())
-                                .collect::<Vec<Vec<u8>>>(),
-                        );
-                        (
-                            accumulator,
-                            total_objects_scanned + object_scanned,
-                            total_wrapped_objects + wrapped_objects_to_remove.len(),
-                        )
-                    },
-                );
-            info!(
-                "[Re-accumulate] Total objects scanned: {}, total wrapped objects: {}",
-                total_objects_scanned, total_wrapped_objects,
-            );
-            info!(
-                "[Re-accumulate] New accumulator value: {:?}",
-                accumulator.digest()
-            );
-            self._database
-                .perpetual_tables
-                .root_state_hash_by_epoch
-                .insert(
-                    &cur_epoch_store.epoch(),
-                    &(last_checkpoint_of_epoch, accumulator),
-                )
-                .unwrap();
-        });
-        info!(
-            "[Re-accumulate] Re-accumulating took {}seconds",
-            cur_time.elapsed().as_secs()
-        );
+        self.execution_cache
+            .maybe_reaccumulate_state_hash(cur_epoch_store, new_protocol_version);
     }
 
     #[instrument(level = "error", skip_all)]
@@ -2861,7 +2726,7 @@ impl AuthorityState {
         );
 
         if let Err(err) = self
-            ._database
+            .__database
             .expensive_check_sui_conservation(cur_epoch_store)
         {
             if cfg!(debug_assertions) {
@@ -2881,7 +2746,7 @@ impl AuthorityState {
                 "Performing state consistency check for epoch {}",
                 cur_epoch_store.epoch()
             );
-            self._database.expensive_check_is_consistent_state(
+            self.expensive_check_is_consistent_state(
                 checkpoint_executor,
                 accumulator,
                 cur_epoch_store,
@@ -2897,8 +2762,48 @@ impl AuthorityState {
         }
     }
 
-    pub fn _db(&self) -> Arc<AuthorityStore> {
-        self._database.clone()
+    fn expensive_check_is_consistent_state(
+        &self,
+        checkpoint_executor: &CheckpointExecutor,
+        accumulator: Arc<StateAccumulator>,
+        cur_epoch_store: &AuthorityPerEpochStore,
+        panic: bool,
+    ) {
+        let live_object_set_hash = accumulator.digest_live_object_set(
+            !cur_epoch_store
+                .protocol_config()
+                .simplified_unwrap_then_delete(),
+        );
+
+        let root_state_hash: ECMHLiveObjectSetDigest = self
+            .execution_cache
+            .get_root_state_accumulator_for_epoch(cur_epoch_store.epoch())
+            .expect("Retrieving root state hash cannot fail")
+            .expect("Root state hash for epoch must exist")
+            .1
+            .digest()
+            .into();
+
+        let is_inconsistent = root_state_hash != live_object_set_hash;
+        if is_inconsistent {
+            if panic {
+                panic!(
+                    "Inconsistent state detected: root state hash: {:?}, live object set hash: {:?}",
+                    root_state_hash, live_object_set_hash
+                );
+            } else {
+                error!(
+                    "Inconsistent state detected: root state hash: {:?}, live object set hash: {:?}",
+                    root_state_hash, live_object_set_hash
+                );
+            }
+        } else {
+            info!("State consistency check passed");
+        }
+
+        if !panic {
+            checkpoint_executor.set_inconsistent_state(is_inconsistent);
+        }
     }
 
     pub fn current_epoch_for_testing(&self) -> EpochId {
@@ -2938,9 +2843,9 @@ impl AuthorityState {
         self.checkpoint_store
             .checkpoint_db(&checkpoint_path_tmp.join("checkpoints"))?;
 
-        self._database
-            .perpetual_tables
+        self.execution_cache
             .checkpoint_db(&store_checkpoint_path_tmp.join("perpetual"))?;
+
         self.committee_store
             .checkpoint_db(&checkpoint_path_tmp.join("epochs"))?;
 
@@ -4623,20 +4528,9 @@ impl AuthorityState {
     }
 
     pub async fn prune_objects_and_compact_for_testing(&self) {
-        let pruning_config = AuthorityStorePruningConfig {
-            num_epochs_to_retain: 0,
-            ..Default::default()
-        };
-        let _ = AuthorityStorePruner::prune_objects_for_eligible_epochs(
-            &self._database.perpetual_tables,
-            &self.checkpoint_store,
-            &self._database.objects_lock_table,
-            pruning_config,
-            AuthorityStorePruningMetrics::new_for_test(),
-            usize::MAX,
-        )
-        .await;
-        let _ = AuthorityStorePruner::compact(&self._database.perpetual_tables);
+        self.execution_cache
+            .prune_objects_and_compact_for_testing(&self.checkpoint_store)
+            .await
     }
 
     /// NOTE: this function is only to be used for fuzzing and testing. Never use in prod
@@ -4761,7 +4655,7 @@ impl TransactionKeyValueStoreTrait for AuthorityState {
         digests: &[TransactionDigest],
     ) -> SuiResult<Vec<Option<CheckpointSequenceNumber>>> {
         let res = self
-            ._database
+            .execution_cache
             .deprecated_multi_get_transaction_checkpoint(digests)?;
 
         Ok(res

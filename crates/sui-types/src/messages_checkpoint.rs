@@ -652,6 +652,10 @@ impl VerifiedCheckpointContents {
         self.transactions.iter()
     }
 
+    pub fn transactions(&self) -> &[VerifiedExecutionData] {
+        &self.transactions
+    }
+
     pub fn into_inner(self) -> FullCheckpointContents {
         FullCheckpointContents {
             transactions: self

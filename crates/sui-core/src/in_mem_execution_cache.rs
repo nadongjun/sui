@@ -1,12 +1,17 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::authority::authority_store::SuiLockResult;
+use crate::authority::authority_per_epoch_store::AuthorityPerEpochStore;
+use crate::authority::authority_store::{ExecutionLockWriteGuard, SuiLockResult};
+use crate::authority::authority_store_pruner::{
+    AuthorityStorePruner, AuthorityStorePruningMetrics,
+};
 use crate::authority::epoch_start_configuration::EpochFlag;
 use crate::authority::AuthorityStore;
 use crate::authority::{
     authority_notify_read::EffectsNotifyRead, epoch_start_configuration::EpochStartConfiguration,
 };
+use crate::checkpoints::CheckpointStore;
 use crate::state_accumulator::AccumulatorStore;
 use crate::transaction_outputs::TransactionOutputs;
 use async_trait::async_trait;
@@ -19,7 +24,10 @@ use futures::{
 use mysten_common::sync::notify_read::NotifyRead;
 use prometheus::{register_int_gauge_with_registry, IntGauge, Registry};
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
+use sui_config::node::AuthorityStorePruningConfig;
+use sui_protocol_config::ProtocolVersion;
 use sui_storage::package_object_cache::PackageObjectCache;
 use sui_types::accumulator::Accumulator;
 use sui_types::base_types::VerifiedExecutionData;
@@ -41,7 +49,8 @@ use sui_types::{
     object::Owner,
     storage::InputKey,
 };
-use tracing::instrument;
+use tap::TapFallible;
+use tracing::{error, instrument};
 use typed_store::Map;
 
 struct ExecutionCacheMetrics {
@@ -238,6 +247,8 @@ pub trait ExecutionCacheRead: Send + Sync {
     fn get_lock(&self, obj_ref: ObjectRef, epoch_id: EpochId) -> SuiLockResult;
 
     fn get_latest_lock_for_object_id(&self, object_id: ObjectID) -> SuiResult<ObjectRef>;
+
+    fn check_owned_object_locks_exist(&self, owned_object_refs: &[ObjectRef]) -> SuiResult;
 
     fn multi_get_transaction_blocks(
         &self,
@@ -521,6 +532,15 @@ pub trait ExecutionCacheReconfigAPI: Send + Sync {
     ) -> SuiResult;
 
     fn update_epoch_flags_metrics(&self, old: &[EpochFlag], new: &[EpochFlag]);
+
+    fn clear_object_per_epoch_marker_table(&self, execution_guard: &ExecutionLockWriteGuard<'_>);
+
+    fn expensive_check_sui_conservation(
+        self: &Arc<Self>,
+        old_epoch_store: &AuthorityPerEpochStore,
+    ) -> SuiResult;
+
+    fn checkpoint_db(&self, path: &PathBuf) -> SuiResult;
 }
 
 // StateSyncAPI is for writing any data that was not the result of transaction execution,
@@ -571,6 +591,38 @@ impl PassthroughCache {
 
     pub fn store_for_testing(&self) -> &Arc<AuthorityStore> {
         &self.store
+    }
+
+    pub async fn prune_objects_and_compact_for_testing(
+        &self,
+        checkpoint_store: &Arc<CheckpointStore>,
+    ) {
+        let pruning_config = AuthorityStorePruningConfig {
+            num_epochs_to_retain: 0,
+            ..Default::default()
+        };
+        let _ = AuthorityStorePruner::prune_objects_for_eligible_epochs(
+            &self.store.perpetual_tables,
+            checkpoint_store,
+            &self.store.objects_lock_table,
+            pruning_config,
+            AuthorityStorePruningMetrics::new_for_test(),
+            usize::MAX,
+        )
+        .await;
+        let _ = AuthorityStorePruner::compact(&self.store.perpetual_tables);
+    }
+
+    /// This is a temporary method to be used when we enable simplified_unwrap_then_delete.
+    /// It re-accumulates state hash for the new epoch if simplified_unwrap_then_delete is enabled.
+    #[instrument(level = "error", skip_all)]
+    pub fn maybe_reaccumulate_state_hash(
+        &self,
+        cur_epoch_store: &AuthorityPerEpochStore,
+        new_protocol_version: ProtocolVersion,
+    ) {
+        self.store
+            .maybe_reaccumulate_state_hash(cur_epoch_store, new_protocol_version);
     }
 }
 
@@ -644,6 +696,10 @@ impl ExecutionCacheRead for PassthroughCache {
 
     fn get_latest_lock_for_object_id(&self, object_id: ObjectID) -> SuiResult<ObjectRef> {
         self.store.get_latest_lock_for_object_id(object_id)
+    }
+
+    fn check_owned_object_locks_exist(&self, owned_object_refs: &[ObjectRef]) -> SuiResult {
+        self.store.check_owned_object_locks_exist(owned_object_refs)
     }
 
     fn multi_get_transaction_blocks(
@@ -815,6 +871,26 @@ impl ExecutionCacheReconfigAPI for PassthroughCache {
 
     fn update_epoch_flags_metrics(&self, old: &[EpochFlag], new: &[EpochFlag]) {
         self.store.update_epoch_flags_metrics(old, new)
+    }
+
+    fn clear_object_per_epoch_marker_table(&self, execution_guard: &ExecutionLockWriteGuard<'_>) {
+        self.store
+            .clear_object_per_epoch_marker_table(execution_guard)
+            .tap_err(|e| {
+                error!(?e, "Failed to clear object per-epoch marker table");
+            })
+            .ok();
+    }
+
+    fn expensive_check_sui_conservation(
+        self: &Arc<Self>,
+        old_epoch_store: &AuthorityPerEpochStore,
+    ) -> SuiResult {
+        self.store.expensive_check_sui_conservation(old_epoch_store)
+    }
+
+    fn checkpoint_db(&self, path: &PathBuf) -> SuiResult {
+        self.store.perpetual_tables.checkpoint_db(path)
     }
 }
 

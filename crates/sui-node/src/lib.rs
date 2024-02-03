@@ -75,7 +75,7 @@ use sui_core::epoch::committee_store::CommitteeStore;
 use sui_core::epoch::data_removal::EpochDataRemover;
 use sui_core::epoch::epoch_metrics::EpochMetrics;
 use sui_core::epoch::reconfiguration::ReconfigurationInitiator;
-use sui_core::in_mem_execution_cache::ExecutionCache;
+use sui_core::in_mem_execution_cache::{ExecutionCache, ExecutionCacheReconfigAPI};
 use sui_core::module_cache_metrics::ResolverMetrics;
 use sui_core::signature_verifier::SignatureVerifierMetrics;
 use sui_core::state_accumulator::StateAccumulator;
@@ -1568,15 +1568,16 @@ impl SuiNode {
             // Arc<AuthorityPerEpochStore> may linger.
             cur_epoch_store.release_db_handles();
 
-            #[cfg(msim)]
-            if !matches!(
-                self.config
-                    .authority_store_pruning_config
-                    .num_epochs_to_retain_for_checkpoints(),
-                None | Some(u64::MAX) | Some(0)
-            ) {
+            if cfg!(msim)
+                && !matches!(
+                    self.config
+                        .authority_store_pruning_config
+                        .num_epochs_to_retain_for_checkpoints(),
+                    None | Some(u64::MAX) | Some(0)
+                )
+            {
                 self.state
-                .prune_checkpoints_for_eligible_epochs(
+                .prune_checkpoints_for_eligible_epochs_for_testing(
                     self.config.clone(),
                     sui_core::authority::authority_store_pruner::AuthorityStorePruningMetrics::new_for_test(),
                 )
@@ -1625,7 +1626,7 @@ impl SuiNode {
             .expect("Reconfigure authority state cannot fail");
         info!(next_epoch, "Node State has been reconfigured");
         assert_eq!(next_epoch, new_epoch_store.epoch());
-        self.state._database.update_epoch_flags_metrics(
+        self.state.get_execution_cache().update_epoch_flags_metrics(
             cur_epoch_store.epoch_start_config().flags(),
             new_epoch_store.epoch_start_config().flags(),
         );
