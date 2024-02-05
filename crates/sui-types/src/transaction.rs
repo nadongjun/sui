@@ -7,8 +7,8 @@ use crate::authenticator_state::ActiveJwk;
 use crate::committee::{EpochId, ProtocolVersion};
 use crate::crypto::{
     default_hash, AuthoritySignInfo, AuthoritySignature, AuthorityStrongQuorumSignInfo,
-    DefaultHash, Ed25519SuiSignature, EmptySignInfo, Signature, Signer, SuiSignatureInner,
-    ToFromBytes,
+    DefaultHash, Ed25519SuiSignature, EmptySignInfo, RandomnessRound, Signature, Signer,
+    SuiSignatureInner, ToFromBytes,
 };
 use crate::digests::ConsensusCommitDigest;
 use crate::digests::{CertificateDigest, SenderSignedDataDigest};
@@ -21,6 +21,7 @@ use crate::messages_consensus::{ConsensusCommitPrologue, ConsensusCommitPrologue
 use crate::object::{MoveObject, Object, Owner};
 use crate::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use crate::signature::{AuthenticatorTrait, GenericSignature, VerifyParams};
+use crate::storage::SharedLocksKey;
 use crate::{
     SUI_AUTHENTICATOR_STATE_OBJECT_ID, SUI_AUTHENTICATOR_STATE_OBJECT_SHARED_VERSION,
     SUI_CLOCK_OBJECT_ID, SUI_CLOCK_OBJECT_SHARED_VERSION, SUI_FRAMEWORK_PACKAGE_ID,
@@ -241,7 +242,7 @@ pub struct RandomnessStateUpdate {
     /// Epoch of the randomness state update transaction
     pub epoch: u64,
     /// Randomness round of the update
-    pub randomness_round: u64,
+    pub randomness_round: RandomnessRound,
     /// Updated random bytes
     pub random_bytes: Vec<u8>,
     /// The initial version of the randomness object that it was shared at.
@@ -2358,6 +2359,15 @@ impl<S> Envelope<SenderSignedData, S> {
             .into_iter()
     }
 
+    pub fn shared_locks_key(&self) -> SharedLocksKey {
+        match &self.data().intent_message().value.kind() {
+            TransactionKind::RandomnessStateUpdate(rsu) => {
+                SharedLocksKey::RandomnessRound(rsu.randomness_round)
+            }
+            _ => SharedLocksKey::Digest(*self.digest()),
+        }
+    }
+
     pub fn is_system_tx(&self) -> bool {
         self.data().intent_message().value.is_system_tx()
     }
@@ -2498,7 +2508,7 @@ impl VerifiedTransaction {
 
     pub fn new_randomness_state_update(
         epoch: u64,
-        randomness_round: u64,
+        randomness_round: RandomnessRound,
         random_bytes: Vec<u8>,
         randomness_obj_initial_shared_version: SequenceNumber,
     ) -> Self {

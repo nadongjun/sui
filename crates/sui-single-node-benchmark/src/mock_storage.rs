@@ -12,11 +12,12 @@ use sui_storage::package_object_cache::PackageObjectCache;
 use sui_types::base_types::{
     EpochId, ObjectID, ObjectRef, SequenceNumber, TransactionDigest, VersionNumber,
 };
+use sui_types::crypto::RandomnessRound;
 use sui_types::error::{SuiError, SuiResult};
 use sui_types::object::{Object, Owner};
 use sui_types::storage::{
     get_module_by_id, BackingPackageStore, ChildObjectResolver, GetSharedLocks, ObjectStore,
-    PackageObject, ParentSync,
+    PackageObject, ParentSync, SharedLocksKey,
 };
 use sui_types::transaction::{InputObjectKind, InputObjects, ObjectReadResult};
 
@@ -46,7 +47,7 @@ impl InMemoryObjectStore {
     pub(crate) fn read_objects_for_execution(
         &self,
         shared_locks: &dyn GetSharedLocks,
-        tx_digest: &TransactionDigest,
+        shared_locks_key: &SharedLocksKey,
         input_object_kinds: &[InputObjectKind],
     ) -> SuiResult<InputObjects> {
         let shared_locks_cell: OnceCell<HashMap<_, _>> = OnceCell::new();
@@ -62,16 +63,13 @@ impl InMemoryObjectStore {
                     let shared_locks = shared_locks_cell.get_or_try_init(|| {
                         Ok::<HashMap<ObjectID, SequenceNumber>, SuiError>(
                             shared_locks
-                                .get_shared_locks(tx_digest)?
+                                .get_shared_locks(shared_locks_key)?
                                 .into_iter()
                                 .collect(),
                         )
                     })?;
                     let version = shared_locks.get(id).unwrap_or_else(|| {
-                        panic!(
-                            "Shared object locks should have been set. tx_digest: {:?}, obj id: {:?}",
-                            tx_digest, id
-                        )
+                        panic!("Shared object locks should have been set. key: {shared_locks_key:?}, obj id: {id:?}")
                     });
 
                     self.get_object_by_key(id, *version)?
@@ -192,7 +190,7 @@ impl ParentSync for InMemoryObjectStore {
 impl GetSharedLocks for InMemoryObjectStore {
     fn get_shared_locks(
         &self,
-        _transaction_digest: &TransactionDigest,
+        _key: &SharedLocksKey,
     ) -> Result<Vec<(ObjectID, SequenceNumber)>, SuiError> {
         unreachable!()
     }

@@ -26,6 +26,7 @@ use sui_core::authority::CHAIN_IDENTIFIER;
 use sui_core::consensus_adapter::SubmitToConsensus;
 use sui_core::epoch::randomness::RandomnessManager;
 use sui_json_rpc_api::JsonRpcMetrics;
+use sui_network::randomness;
 use sui_types::base_types::ConciseableName;
 use sui_types::digests::ChainIdentifier;
 use sui_types::message_envelope::get_google_jwk_bytes;
@@ -209,7 +210,8 @@ pub struct SuiNode {
     metrics: Arc<SuiNodeMetrics>,
 
     _discovery: discovery::Handle,
-    state_sync: state_sync::Handle,
+    state_sync_handle: state_sync::Handle,
+    randomness_handle: randomness::Handle,
     checkpoint_store: Arc<CheckpointStore>,
     accumulator: Arc<StateAccumulator>,
     connection_monitor_status: Arc<ConnectionMonitorStatus>,
@@ -542,6 +544,8 @@ impl SuiNode {
             archive_readers.clone(),
             &prometheus_registry,
         )?;
+        let randomness_handle: sui_network::randomness::Handle = todo!(); // TODO-DNS make this inside create_p2p_network above
+
         // We must explicitly send this instead of relying on the initial value to trigger
         // watch value change, so that state-sync is able to process it.
         send_trusted_peer_change(
@@ -684,6 +688,7 @@ impl SuiNode {
                 epoch_store.clone(),
                 checkpoint_store.clone(),
                 state_sync_handle.clone(),
+                randomness_handle.clone(),
                 accumulator.clone(),
                 connection_monitor_status.clone(),
                 &registry_service,
@@ -711,7 +716,8 @@ impl SuiNode {
             metrics: sui_node_metrics,
 
             _discovery: discovery_handle,
-            state_sync: state_sync_handle,
+            state_sync_handle,
+            randomness_handle,
             checkpoint_store,
             accumulator,
             end_of_epoch_channel,
@@ -1012,6 +1018,7 @@ impl SuiNode {
         epoch_store: Arc<AuthorityPerEpochStore>,
         checkpoint_store: Arc<CheckpointStore>,
         state_sync_handle: state_sync::Handle,
+        randomness_handle: randomness::Handle,
         accumulator: Arc<StateAccumulator>,
         connection_monitor_status: Arc<ConnectionMonitorStatus>,
         registry_service: &RegistryService,
@@ -1085,6 +1092,7 @@ impl SuiNode {
             checkpoint_store,
             epoch_store,
             state_sync_handle,
+            randomness_handle,
             consensus_manager,
             consensus_epoch_data_remover,
             accumulator,
@@ -1103,6 +1111,7 @@ impl SuiNode {
         checkpoint_store: Arc<CheckpointStore>,
         epoch_store: Arc<AuthorityPerEpochStore>,
         state_sync_handle: state_sync::Handle,
+        randomness_handle: randomness::Handle,
         consensus_manager: ConsensusManager,
         consensus_epoch_data_remover: EpochDataRemover,
         accumulator: Arc<StateAccumulator>,
@@ -1180,11 +1189,15 @@ impl SuiNode {
             let randomness_manager = RandomnessManager::try_new(
                 Arc::downgrade(&epoch_store),
                 consensus_adapter.clone(),
+                randomness_handle,
                 config.protocol_key_pair(),
             )
+            .await
             .map(Arc::new);
             if let Some(randomness_manager) = &randomness_manager {
-                epoch_store.set_randomness_manager(randomness_manager.clone())?;
+                epoch_store
+                    .set_randomness_manager(randomness_manager.clone())
+                    .await?;
             }
         }
 
@@ -1359,7 +1372,7 @@ impl SuiNode {
     /// after which it iniitiates reconfiguration of the entire system.
     pub async fn monitor_reconfiguration(self: Arc<Self>) -> Result<()> {
         let mut checkpoint_executor = CheckpointExecutor::new(
-            self.state_sync.subscribe_to_synced_checkpoints(),
+            self.state_sync_handle.subscribe_to_synced_checkpoints(),
             self.checkpoint_store.clone(),
             self.state.clone(),
             self.accumulator.clone(),
@@ -1509,7 +1522,8 @@ impl SuiNode {
                             consensus_adapter,
                             self.checkpoint_store.clone(),
                             new_epoch_store.clone(),
-                            self.state_sync.clone(),
+                            self.state_sync_handle.clone(),
+                            self.randomness_handle.clone(),
                             consensus_manager,
                             consensus_epoch_data_remover,
                             self.accumulator.clone(),
@@ -1545,7 +1559,8 @@ impl SuiNode {
                             Arc::new(next_epoch_committee.clone()),
                             new_epoch_store.clone(),
                             self.checkpoint_store.clone(),
-                            self.state_sync.clone(),
+                            self.state_sync_handle.clone(),
+                            self.randomness_handle.clone(),
                             self.accumulator.clone(),
                             self.connection_monitor_status.clone(),
                             &self.registry_service,

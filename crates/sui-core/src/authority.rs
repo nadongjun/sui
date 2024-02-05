@@ -1012,7 +1012,7 @@ impl AuthorityState {
                 self.input_loader
                     .read_objects_for_execution(
                         epoch_store.as_ref(),
-                        tx_digest,
+                        &certificate.inner().shared_locks_key(),
                         input_objects,
                         epoch_store.epoch(),
                     )
